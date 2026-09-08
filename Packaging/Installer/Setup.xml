@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+    <title>Hearth</title>
+    <options customize="never" require-scripts="true" rootVolumeOnly="true" hostArchitectures="@HEARTH_ARCHITECTURE@"/>
+    <domains enable_anywhere="false" enable_currentUserHome="false" enable_localSystem="true"/>
+    <allowed-os-versions><os-version min="13.0"/></allowed-os-versions>
+    <welcome file="Setup.html" mime-type="text/html"/>
+    <readme file="Installation.html" mime-type="text/html"/>
+    <license file="License.txt" mime-type="text/plain"/>
+    <conclusion file="Conclusion.html" mime-type="text/html"/>
+    <choices-outline><line choice="setup"/></choices-outline>
+    <choice id="setup" visible="false"><pkg-ref id="dev.girishkvs.hearth.setup"/></choice>
+    <pkg-ref id="dev.girishkvs.hearth.setup" auth="Root">Hearth-Setup-Component.pkg</pkg-ref>
+</installer-gui-script>

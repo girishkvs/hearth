@@ -1,0 +1,11 @@
+#!/bin/sh
+set -eu
+PATH=/usr/bin:/bin:/usr/sbin:/sbin
+export PATH
+umask 022
+if [ "$#" -lt 3 ] || [ "$3" != "/" ]; then
+    printf 'Hearth only supports explicit setup on the running startup volume.\n' >&2
+    exit 1
+fi
+here="$(/usr/bin/dirname "$0")"
+exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LC_ALL=C "$here/installer-tool" setup-preflight

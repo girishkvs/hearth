@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Hearth</title>
+<style>
+:root { color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, sans-serif; color: #202832; background: #f5f6f8; --surface: #fff; --line: #d3d9e1; --muted: #586576; --accent: #165fc4; --button-text: #fff; --error: #a3212c; }
+* { box-sizing: border-box; }
+body { margin: 0; padding: 24px 16px; line-height: 1.4; }
+main { max-width: 400px; margin: auto; }
+h1 { font-size: 16px; margin: 0 0 18px; }
+h2 { font-size: 16px; line-height: 1.3; margin: 0 0 6px; }
+h3, legend { font-size: 14px; font-weight: 600; margin: 0 0 8px; }
+p { margin: 0; }
+button, input, select { font: inherit; }
+button, select, input { color: inherit; background: var(--surface); border: 1px solid var(--line); border-radius: 7px; }
+button { padding: 9px 14px; cursor: pointer; }
+button:disabled { opacity: .5; cursor: not-allowed; }
+button:focus-visible, summary:focus-visible, input:focus-visible, select:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+#keep-awake { min-height: 36px; margin-top: 14px; font-size: 14px; font-weight: 600; background: var(--accent); color: var(--button-text); border-color: var(--accent); }
+#actual, #action-note, #activity, footer, .detail { color: var(--muted); font-size: 14px; }
+#action-note { margin-top: 10px; }
+.status-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; }
+#activity { margin-top: 10px; }
+#refresh { border: 0; background: none; color: var(--accent); padding: 4px 0; font-size: 13px; flex-shrink: 0; }
+#error { margin-top: 16px; padding-left: 12px; border-left: 3px solid var(--error); color: var(--error); font-size: 14px; overflow-wrap: anywhere; }
+#error p + p { margin-top: 8px; }
+#diagnostics { margin-top: 10px; font-size: 12px; overflow-wrap: anywhere; }
+#diagnostics summary { font-size: 12px; font-weight: 400; }
+#error-detail p { margin-top: 8px; }
+#outcomes { margin: 12px 0 0; padding-left: 20px; font-size: 14px; }
+#advanced { margin-top: 20px; border-top: 1px solid var(--line); padding-top: 12px; }
+summary { cursor: pointer; font-size: 14px; font-weight: 600; }
+fieldset { border: 0; margin: 20px 0; padding: 0; }
+select { padding: 8px 10px; width: 100%; }
+.timeout { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.timeout-heading { margin-top: 20px; }
+#minutes { width: 90px; padding: 8px; }
+.detail { margin-top: 8px; }
+.profile { margin: 14px 0; font-size: 14px; }
+.profile p + p { margin-top: 3px; }
+#helper-message { margin: 4px 0 12px; }
+#setup-instructions { margin-top: 12px; }
+#setup-instructions p { margin-top: 8px; font-size: 14px; }
+code { font-size: 12px; overflow-wrap: anywhere; }
+footer { margin-top: 24px; font-size: 12px; }
+[hidden] { display: none !important; }
+@media (prefers-color-scheme: dark) {
+  :root { color: #e7ebf1; background: #191e26; --surface: #232b36; --line: #465363; --muted: #aebac9; --accent: #a9cbff; --button-text: #112b50; --error: #ffb0b8; }
+}
+@media (max-width: 420px) { body { padding: 20px 16px; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Hearth</h1>
+  <section aria-label="Keep awake">
+    <h2 id="state" aria-live="polite">Checking settings...</h2>
+    <p id="actual">Reading battery and adapter settings.</p>
+    <button id="keep-awake" type="button" disabled>Keep awake</button>
+    <p id="action-note">Both power sources are selected by default.</p>
+    <p id="activity" role="status">Connecting...</p>
+    <div id="error" role="alert" hidden></div>
+    <details id="diagnostics" hidden><summary>Diagnostic details</summary><div id="error-detail"></div></details>
+  </section>
+  <details id="advanced">
+    <summary>Advanced</summary>
+    <div class="status-actions">
+      <p id="updated" class="detail"></p>
+      <button id="refresh" type="button" disabled>Refresh status</button>
+    </div>
+    <fieldset>
+      <legend>Power sources</legend>
+      <select id="target" aria-label="Power sources">
+        <option value="both" selected>Both</option>
+        <option value="battery">Battery</option>
+        <option value="adapter">Adapter</option>
+      </select>
+    </fieldset>
+    <fieldset id="controls" disabled>
+      <h3 class="timeout-heading">Set a sleep timeout</h3>
+      <div class="timeout">
+        <input id="minutes" aria-label="Sleep timeout in minutes" type="number" inputmode="numeric" min="1" max="2147483647" step="1" placeholder="10">
+        <span>minutes</span>
+        <button id="set-timeout" type="button">Set timeout</button>
+      </div>
+      <p class="detail">This becomes your new setting and replaces the selected restore record.</p>
+    </fieldset>
+    <h3>Current settings</h3>
+    <div id="profiles"></div>
+    <p id="source" class="detail"></p>
+    <p id="helper-heading" class="detail">Helper not yet checked.</p>
+    <p id="helper-message" class="detail"></p>
+    <ul id="outcomes" hidden></ul>
+    <details id="setup-instructions">
+      <summary>Setup or repair</summary>
+      <p>Run <code>hearth setup</code> for instructions. From source, build
+      <code>scripts/package-installer.sh</code>, review the versioned package under <code>dist/</code>,
+      then use <code>scripts/install.sh --gui</code> or <code>--cli</code> explicitly.
+      This page never opens Installer or asks for a password.</p>
+      <p>Use <code>scripts/uninstall.sh --keep-settings --gui</code> (or <code>--cli</code>) for explicit removal.
+      Setup, repair, and updates may require administrator approval; everyday controls do not.</p>
+    </details>
+    <p class="detail">Hearth controls idle sleep only. Lid closure, manual sleep, critical battery,
+    system safety behavior, and other apps' sleep assertions are unchanged.</p>
+  </details>
+  <footer>Display can turn off.</footer>
+</main>
+<script>
+(() => {
+  "use strict";
+  const storageKey = "hearth-token";
+  let token = location.hash.slice(1);
+  history.replaceState(null, "", location.pathname);
+  try {
+    if (/^[0-9a-f]{64}$/.test(token)) sessionStorage.setItem(storageKey, token);
+    else token = sessionStorage.getItem(storageKey) || "";
+  } catch (_) {
+    // Memory-only access still works when browser storage is disabled.
+  }
+  if (!/^[0-9a-f]{64}$/.test(token)) token = "";
+
+  const primary = document.getElementById("keep-awake");
+  const controls = document.getElementById("controls");
+  const target = document.getElementById("target");
+  const refreshButton = document.getElementById("refresh");
+  const activity = document.getElementById("activity");
+  const error = document.getElementById("error");
+  const outcomes = document.getElementById("outcomes");
+  let status = null;
+  let hasStatus = false;
+  let writing = false;
+  let refreshing = false;
+  let refreshController = null;
+  let generation = 0;
+  let actionError = "";
+  let statusError = "";
+  let actionDetails = "";
+  let statusDetails = "";
+  let lastAction = "";
+  const warnings = new Set();
+  const labels = { battery: "Battery", adapter: "Adapter", both: "battery and adapter" };
+
+  function textElement(tag, text, className) {
+    const element = document.createElement(tag);
+    element.textContent = text;
+    if (className) element.className = className;
+    return element;
+  }
+  function describe(minutes) {
+    if (!Number.isInteger(minutes)) return "Not available";
+    return minutes === 0 ? "Never idle sleeps" : `Idle sleep after ${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
+  }
+  function selected() {
+    return (status?.profiles || []).filter(profile => target.value === "both" || profile.profile === target.value);
+  }
+  function hasOverride() { return selected().some(profile => Number.isInteger(profile.originalMinutes)); }
+  function pending() { return (status?.profiles || []).some(profile => profile.phase?.startsWith("pending")); }
+  function canWrite() {
+    const profiles = selected();
+    return hasStatus && status?.helper?.state === "ready" && !writing && !pending() &&
+      (status?.warnings || []).length === 0 &&
+      profiles.length > 0 && profiles.every(profile => Number.isInteger(profile.actualMinutes));
+  }
+  function renderFeedback() {
+    const messages = [statusError || actionError].filter(Boolean);
+    const details = [actionDetails, statusDetails, ...warnings].filter(Boolean);
+    if (hasStatus && status?.helper?.state !== "ready") {
+      if (!messages.length) messages.push("Hearth needs setup or repair. Open Advanced for instructions.");
+      details.push(status?.helper?.message || "Helper unavailable.");
+    }
+    if (warnings.size && !messages.length) messages.push("Settings need attention. Check the diagnostic details before continuing.");
+    error.replaceChildren(...Array.from(new Set(messages)).map(message => textElement("p", message)));
+    error.hidden = !error.childElementCount;
+    document.getElementById("error-detail").replaceChildren(...Array.from(new Set(details)).map(message => textElement("p", message)));
+    document.getElementById("diagnostics").hidden = !details.length;
+  }
+  function renderControls() {
+    const profiles = selected();
+    const managed = hasOverride();
+    const allNever = profiles.length > 0 && profiles.every(profile => profile.actualMinutes === 0);
+    primary.textContent = writing ? "Working..." : managed ? "Restore previous settings" : "Keep awake";
+    primary.disabled = !token || !canWrite() || (allNever && !managed);
+    controls.disabled = !token || !canWrite();
+    target.disabled = writing;
+    refreshButton.disabled = !token || writing || refreshing;
+    const state = document.getElementById("state");
+    if (writing) state.textContent = "Changing settings...";
+    else if (!hasStatus) state.textContent = status ? "Status unavailable" : "Checking settings...";
+    else if (pending()) state.textContent = "Change not yet confirmed";
+    else if (status?.helper?.state !== "ready") state.textContent = "Setup needed";
+    else if ((status?.warnings || []).length) state.textContent = "Settings need attention";
+    else if (managed) state.textContent = allNever ? "Keeping awake" : "Keeping some sources awake";
+    else state.textContent = allNever ? "Already set to stay awake" : "Idle sleep settings";
+    state.hidden = !writing && hasStatus && status?.helper?.state === "ready" && !pending() &&
+      !(status?.warnings || []).length && !managed && !allNever;
+    const summary = profiles.map(profile => `${labels[profile.profile]}: ${!Number.isInteger(profile.actualMinutes) ? "unknown" : profile.actualMinutes === 0 ? "never" : `${profile.actualMinutes} min`}`).join(" · ");
+    document.getElementById("actual").textContent = summary ? `${hasStatus ? "" : "Last known: "}${summary}.` : "Settings have not been read yet.";
+    document.getElementById("action-note").textContent = pending()
+      ? "An operation is still unconfirmed. Refresh status before making another change."
+      : managed
+        ? "Restores only Hearth's changes."
+        : allNever
+          ? "No saved setting to restore. Choose an explicit timeout in Advanced if desired."
+          : `For ${labels[target.value].toLowerCase()}.`;
+    renderFeedback();
+  }
+  function renderStatus(value) {
+    status = value;
+    hasStatus = true;
+    for (const warning of value.warnings || []) warnings.add(warning);
+    const details = document.getElementById("profiles");
+    details.replaceChildren();
+    for (const profile of value.profiles) {
+      const row = textElement("div", "", "profile");
+      row.append(textElement("p", `${labels[profile.profile]}: ${describe(profile.actualMinutes)}`));
+      row.append(textElement("p", Number.isInteger(profile.originalMinutes)
+        ? `Saved previous setting: ${describe(profile.originalMinutes)}.`
+        : "No saved restore value.", "detail"));
+      if (profile.phase) row.append(textElement("p", `State: ${profile.phase}`, "detail"));
+      details.append(row);
+    }
+    document.getElementById("source").textContent = `Current source: ${value.currentSource || "Unknown"}`;
+    const helperLabels = { ready: "Helper ready", setupRequired: "Helper setup required",
+      incompatible: "Helper incompatible", unavailable: "Helper unavailable" };
+    document.getElementById("helper-heading").textContent = helperLabels[value.helper?.state] || "Helper unavailable";
+    document.getElementById("helper-message").textContent = value.helper?.message || "Helper status is unavailable.";
+    renderControls();
+  }
+  async function api(path, options = {}) {
+    const response = await fetch(path, {
+      ...options, cache: "no-store", credentials: "omit", redirect: "error",
+      headers: { "Authorization": `Bearer ${token}`, ...options.headers }
+    });
+    const payload = await response.json();
+    if (response.status === 401) {
+      token = "";
+      try { sessionStorage.removeItem(storageKey); } catch (_) {}
+    }
+    if (!response.ok && !payload.outcomes) throw new Error(payload.error || `Request failed (${response.status}).`);
+    return payload;
+  }
+  async function refresh() {
+    if (!token || writing || refreshing) return;
+    refreshing = true;
+    const requestGeneration = ++generation;
+    const controller = new AbortController();
+    refreshController = controller;
+    const deadline = setTimeout(() => controller.abort(), 15000);
+    renderControls();
+    try {
+      const value = await api("/api/status", { signal: controller.signal });
+      if (writing || requestGeneration !== generation) return;
+      statusError = "";
+      statusDetails = "";
+      renderStatus(value);
+      document.getElementById("updated").textContent = `Updated ${new Date().toLocaleTimeString()}`;
+      activity.textContent = lastAction;
+    } catch (failure) {
+      if (writing || requestGeneration !== generation) return;
+      hasStatus = false;
+      statusDetails = failure.message;
+      statusError = failure.message.includes("Another Hearth operation")
+        ? "A change is still in progress. Wait, then refresh in Advanced."
+        : "Current settings could not be read. Refresh in Advanced before making a change.";
+      activity.textContent = "";
+    } finally {
+      clearTimeout(deadline);
+      refreshing = false;
+      refreshController = null;
+      renderControls();
+    }
+  }
+  async function perform(action) {
+    if (!token || !canWrite()) return;
+    const request = { action, target: target.value };
+    if (action === "sleep") {
+      const input = document.getElementById("minutes");
+      const value = input.value.trim();
+      if (!/^[0-9]+$/.test(value) || !Number.isSafeInteger(Number(value)) ||
+          Number(value) < 1 || Number(value) > 2147483647) {
+        actionError = "Enter a positive whole number of minutes.";
+        actionDetails = "Timeouts must be an integer from 1 to 2147483647.";
+        renderFeedback();
+        input.focus();
+        return;
+      }
+      request.minutes = Number(value);
+    }
+    writing = true;
+    generation += 1;
+    refreshController?.abort();
+    outcomes.replaceChildren();
+    outcomes.hidden = true;
+    activity.textContent = `Applying to ${labels[request.target].toLowerCase()}...`;
+    renderControls();
+    try {
+      const result = await api("/api/power", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(request)
+      });
+      statusError = "";
+      statusDetails = "";
+      if (result.succeeded) {
+        actionError = "";
+        actionDetails = "";
+        warnings.clear();
+      } else {
+        const incomplete = result.outcomes.filter(outcome => outcome.kind === "failed" || outcome.kind === "preserved");
+        const failures = incomplete
+          .map(outcome => `${labels[outcome.profile]}: ${outcome.message}`).join(" ");
+        const affected = incomplete.map(outcome => labels[outcome.profile]).join(" and ");
+        actionError = `${affected || "The"} change was not fully completed. Check details before retrying.`;
+        actionDetails = failures;
+      }
+      renderStatus(result.status);
+      for (const outcome of result.outcomes) outcomes.append(textElement("li", `${labels[outcome.profile]}: ${outcome.message}`));
+      outcomes.hidden = !outcomes.childElementCount;
+      lastAction = result.succeeded
+        ? action === "restore" ? "Previous settings restored." : action === "sleep" ? "Sleep timeout saved." : "Keep-awake settings applied."
+        : "";
+      activity.textContent = lastAction;
+    } catch (failure) {
+      hasStatus = false;
+      actionError = "The change could not be confirmed. Refresh in Advanced before trying again.";
+      actionDetails = failure.message;
+      lastAction = "";
+      activity.textContent = "";
+    } finally {
+      writing = false;
+      renderControls();
+    }
+  }
+  primary.addEventListener("click", () => perform(hasOverride() ? "restore" : "on"));
+  document.getElementById("set-timeout").addEventListener("click", () => perform("sleep"));
+  target.addEventListener("change", renderControls);
+  refreshButton.addEventListener("click", refresh);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+  setInterval(() => { if (!document.hidden && !writing) refresh(); }, 10000);
+  renderControls();
+  if (token) refresh();
+  else {
+    document.getElementById("state").textContent = "Open your private link";
+    actionError = "Reopen the URL printed by hearth web. Keep that link private.";
+    activity.textContent = "Not connected.";
+    renderFeedback();
+  }
+})();
+</script>
+</body>
+</html>

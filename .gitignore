@@ -1,0 +1,13 @@
+.build/
+.swiftpm/
+dist/
+.DS_Store
+.env
+.env.*
+!.env.example
+*.log
+*.xcresult/
+*.xcuserstate
+/artifacts/
+**/empty-support-repair.plist
+**/repair-approval.plist

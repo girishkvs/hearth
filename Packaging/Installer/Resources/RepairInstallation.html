@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="light dark">
+<title>Hearth Installer - Read Me</title>
+<style>
+:root { color-scheme: light dark; }
+body { font: 13px/1.4 -apple-system, BlinkMacSystemFont, sans-serif; color: CanvasText; background: transparent; margin: 0; }
+h2 { font-size: 13px; font-weight: 600; margin: 10px 0 3px; }
+h2:first-child { margin-top: 0; }
+p { margin: 0; }
+code { font: inherit; overflow-wrap: anywhere; }
+.build-note { margin-top: 12px; }
+</style>
+</head>
+<body data-page="RepairInstallation">
+<h2>Get started</h2>
+<p>Hearth installs in Applications with a Terminal command and a small helper.
+Open the app and click its flame icon in the menu bar. Use <code>hearth</code> in Terminal,
+or <code>hearth web</code> for browser controls.</p>
+<h2>Permission and settings</h2>
+<p>Setup and maintenance need administrator approval; everyday controls do not.
+Installation leaves sleep settings unchanged.</p>
+<h2>Approved repair for this setup</h2>
+<p>This package also corrects group ownership of the unchanged, empty
+<code>/Library/Application Support/Hearth</code> folder left by the earlier attempt.
+Setup stops if that folder or installation state has changed.</p>
+<h2>Remove Hearth</h2>
+<p>Use the companion <code>Hearth-Remove.pkg</code>. Restore previous settings in Hearth
+first, if desired.</p>
+<p class="build-note">Locally built and unsigned; not notarized by Apple.
+Use only a package from a source you trust.</p>
+</body>
+</html>

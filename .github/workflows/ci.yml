@@ -1,0 +1,42 @@
+name: CI
+
+"on":
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 25
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Toolchain
+        run: |
+          test "$(id -u)" -ne 0
+          xcodebuild -version
+          swift --version
+          uname -m
+      - name: Swift tests
+        run: swift test --disable-automatic-resolution
+      - name: Native fake-backend smoke
+        run: .build/debug/HearthApp --smoke-test
+      - name: Installer and package fixtures
+        run: scripts/test-package.sh --fixture
+      - name: Check generated version and source cleanliness
+        run: |
+          scripts/sync-version.sh
+          git diff --exit-code
