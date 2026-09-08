@@ -1,3 +1,4 @@
+import CoreFoundation
 import CryptoKit
 import Darwin
 import Foundation
@@ -57,7 +58,7 @@ class Host {
         }
     }
 
-    func run(_ executable: String, _ arguments: [String]) throws -> CommandResult {
+    func run(_ executable: String, _ arguments: [String], standardOutputOnly: Bool = false) throws -> CommandResult {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
@@ -65,7 +66,7 @@ class Host {
         process.currentDirectoryURL = URL(fileURLWithPath: "/")
         let output = Pipe()
         process.standardOutput = output
-        process.standardError = output
+        process.standardError = standardOutputOnly ? FileHandle.nullDevice : output
         try process.run()
         let data = output.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
@@ -118,6 +119,7 @@ final class Validator {
     let link = "/usr/local/bin/hearth"
     let packageID = "dev.girishkvs.hearth.setup"
     let service = "system/dev.girishkvs.hearth.helper"
+    let currentProtocolVersion = 2
 
     init(root: String, host: Host = Host()) {
         self.root = root == "/" ? "" : root
@@ -247,7 +249,34 @@ final class Validator {
         return value
     }
 
-    func codeHash(_ relative: String, identifier: String) throws -> String {
+    private func validateEntitlements(_ relative: String, nativeApp: Bool, acceptingLegacyApp: Bool) throws {
+        // --xml avoids codesign's human-readable abstract format. Diagnostics such
+        // as Executable= go to stderr; successful empty stdout means no entitlements.
+        let result = try host.run("/usr/bin/codesign",
+            ["--display", "--entitlements", "-", "--xml", path(relative)], standardOutputOnly: true)
+        guard result.status == 0 else { try fail("Cannot read entitlements: \(relative)") }
+        let entitlements: [String: Any]
+        if result.output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            entitlements = [:]
+        } else {
+            guard let value = try? PropertyListSerialization.propertyList(
+                from: Data(result.output.utf8), format: nil) as? [String: Any] else {
+                try fail("Invalid entitlement property list: \(relative)")
+            }
+            entitlements = value
+        }
+        if entitlements.isEmpty { return }
+        guard nativeApp,
+              acceptingLegacyApp,
+              entitlements.count == 1,
+              let automation = entitlements["com.apple.security.automation.apple-events"] as? NSNumber,
+              CFGetTypeID(automation) == CFBooleanGetTypeID(),
+              automation.boolValue else {
+            try fail("Unexpected entitlements: \(relative)")
+        }
+    }
+
+    func codeHash(_ relative: String, identifier: String, acceptingLegacyApp: Bool = false) throws -> String {
         let artifact = path(relative)
         let architecture = try host.run("/usr/bin/lipo", ["-archs", artifact])
         let slices = architecture.output.split(whereSeparator: \.isWhitespace)
@@ -268,11 +297,9 @@ final class Validator {
               }) else {
             try fail("Expected identifier and hardened runtime missing: \(relative)")
         }
-        let entitlements = try host.run("/usr/bin/codesign", ["--display", "--entitlements", "-", artifact])
-        guard entitlements.status == 0,
-              !entitlements.output.contains("<key>") else {
-            try fail("Unexpected entitlements: \(relative)")
-        }
+        let nativeApp = relative == app + "/Contents/MacOS/HearthApp" &&
+            identifier == "dev.girishkvs.hearth"
+        try validateEntitlements(relative, nativeApp: nativeApp, acceptingLegacyApp: acceptingLegacyApp)
         let hashes = lines.filter { $0.hasPrefix("CDHash=") }.map { String($0.dropFirst(7)) }
         guard hashes.count == 1,
               hashes[0].range(of: "^[0-9a-f]{40}$", options: .regularExpression) != nil else {
@@ -281,13 +308,16 @@ final class Validator {
         return hashes[0]
     }
 
-    func validateSignatures() throws {
+    func validateSignatures(acceptingLegacyInstallation: Bool = false) throws {
         let authorization = try PropertyListDecoder().decode(
             Authorization.self, from: Data(contentsOf: URL(fileURLWithPath: path(policy))))
+        let compatibleProtocol = authorization.ProtocolVersion == currentProtocolVersion ||
+            (acceptingLegacyInstallation && authorization.ProtocolVersion == 1)
         guard authorization.FormatVersion == 1,
-              authorization.ProtocolVersion == 1,
+              compatibleProtocol,
               !authorization.BuildIdentifier.isEmpty else { try fail("Invalid authorization policy") }
-        let appHash = try codeHash(app + "/Contents/MacOS/HearthApp", identifier: "dev.girishkvs.hearth")
+        let appHash = try codeHash(app + "/Contents/MacOS/HearthApp", identifier: "dev.girishkvs.hearth",
+                                  acceptingLegacyApp: acceptingLegacyInstallation)
         let cliHash = try codeHash(app + "/Contents/MacOS/hearth", identifier: "dev.girishkvs.hearth.cli")
         let helperHash = try codeHash(helper, identifier: "dev.girishkvs.hearth.helper")
         let bundle = try host.run("/usr/bin/codesign", ["--verify", "--strict", "--all-architectures", path(app)])
@@ -316,7 +346,9 @@ final class Validator {
         let authorization = try PropertyListDecoder().decode(
             Authorization.self, from: Data(contentsOf: URL(fileURLWithPath: path(policy))))
         guard authorization.BuildIdentifier == expected.buildIdentifier else { try fail("Policy and inventory builds differ") }
-        try validateSignatures()
+        // Only installed maintenance accepts the verified legacy app-only Automation
+        // grant. New/staged apps need no entitlements for current-user preferences.
+        try validateSignatures(acceptingLegacyInstallation: true)
         return expected
     }
 

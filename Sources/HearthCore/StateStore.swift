@@ -20,14 +20,82 @@ struct ProfileState: Codable, Equatable, Sendable {
 }
 
 struct SavedState: Codable, Equatable, Sendable {
-    var version = 1
+    var version = 4
     var profiles: [String: ProfileState] = [:]
+    var displayProfiles: [String: ProfileState] = [:]
+    var lockOverride: LockOverride?
 
-    func validate() throws {
-        guard version == 1 else {
+    init(version: Int = 4, profiles: [String: ProfileState] = [:], displayProfiles: [String: ProfileState] = [:], lockOverride: LockOverride? = nil) {
+        self.version = version
+        self.profiles = profiles
+        self.displayProfiles = displayProfiles
+        self.lockOverride = lockOverride
+    }
+
+    private enum CodingKeys: String, CodingKey { case version, profiles, displayProfiles, lockOverride }
+
+    init(from decoder: any Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        version = try values.decode(Int.self, forKey: .version)
+        guard (1...4).contains(version) else {
             throw HearthError.state("Unsupported Hearth state version \(version). Use a compatible Hearth version; state was not changed.")
         }
-        for (key, record) in profiles {
+        profiles = try values.decode([String: ProfileState].self, forKey: .profiles)
+        if version == 1 {
+            guard !values.contains(.displayProfiles) else {
+                throw HearthError.state("Version 1 Hearth state cannot contain display restore records.")
+            }
+            displayProfiles = [:]
+        } else {
+            displayProfiles = try values.decode([String: ProfileState].self, forKey: .displayProfiles)
+        }
+        if version >= 3 {
+            lockOverride = try values.decodeIfPresent(LockOverride.self, forKey: .lockOverride)
+        } else if values.contains(.lockOverride) {
+            throw HearthError.state("Older Hearth state cannot contain Lock restore records.")
+        }
+    }
+
+    func encode(to encoder: any Encoder) throws {
+        var values = encoder.container(keyedBy: CodingKeys.self)
+        try values.encode(version, forKey: .version)
+        try values.encode(profiles, forKey: .profiles)
+        if version >= 2 { try values.encode(displayProfiles, forKey: .displayProfiles) }
+        if version >= 3 { try values.encodeIfPresent(lockOverride, forKey: .lockOverride) }
+    }
+
+    subscript(setting: PowerSetting, profile: PowerProfile) -> ProfileState? {
+        get {
+            setting == .system ? profiles[profile.rawValue] : displayProfiles[profile.rawValue]
+        }
+        set {
+            switch setting {
+            case .system: profiles[profile.rawValue] = newValue
+            case .display: displayProfiles[profile.rawValue] = newValue
+            }
+        }
+    }
+
+    func validate() throws {
+        guard (1...4).contains(version) else {
+            throw HearthError.state("Unsupported Hearth state version \(version). Use a compatible Hearth version; state was not changed.")
+        }
+        guard version >= 2 || displayProfiles.isEmpty else {
+            throw HearthError.state("Version 1 Hearth state cannot contain display restore records.")
+        }
+        try validate(profiles)
+        try validate(displayProfiles)
+        guard version >= 3 || lockOverride == nil else {
+            throw HearthError.state("Older Hearth state cannot contain Lock restore records.")
+        }
+        guard version >= 4 || lockOverride?.backend != .preferences else {
+            throw HearthError.state("Older Hearth state cannot contain CFPreferences Lock records.")
+        }
+        try lockOverride?.validate()
+    }
+
+    private func validate(_ records: [String: ProfileState]) throws {
+        for (key, record) in records {
             guard PowerProfile(rawValue: key) != nil, !record.isEmpty else {
                 throw HearthError.state("Invalid profile in Hearth state. Restore values cannot be trusted.")
             }

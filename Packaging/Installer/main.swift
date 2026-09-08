@@ -24,7 +24,7 @@ do {
     let validator = Validator(root: CommandLine.arguments[1])
     let build = CommandLine.arguments[2]
     let authorization = Authorization(
-        FormatVersion: 1, ProtocolVersion: 1,
+        FormatVersion: 1, ProtocolVersion: validator.currentProtocolVersion,
         AppCodeHash: try validator.codeHash(validator.app + "/Contents/MacOS/HearthApp", identifier: "dev.girishkvs.hearth"),
         CLICodeHash: try validator.codeHash(validator.app + "/Contents/MacOS/hearth", identifier: "dev.girishkvs.hearth.cli"),
         HelperCodeHash: try validator.codeHash(validator.helper, identifier: "dev.girishkvs.hearth.helper"),

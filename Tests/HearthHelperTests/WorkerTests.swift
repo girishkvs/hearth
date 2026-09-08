@@ -7,48 +7,64 @@ import XCTest
 
 private final class FakeBackend: IdleSleepBackend, @unchecked Sendable {
     private let lock = NSLock()
-    private var values = ["battery": 1, "adapter": 5]
-    private var writes: [String] = []
+    private var values: [HelperPowerSetting: [HelperPowerProfile: Int]] = [
+        .system: [.battery: 1, .adapter: 5],
+        .display: [.battery: 2, .adapter: 10],
+    ]
+    private var writes: [IdleSleepChange] = []
+    private var reads = 0
     let entered = DispatchSemaphore(value: 0)
     let release = DispatchSemaphore(value: 0)
     let pause: Bool
-    let failure: String?
+    let failure: HelperPowerProfile?
+    let readFailure: HelperPowerProfile?
     let beforeReadReturns: (@Sendable () -> Void)?
     let rejectBeforeLaunch: Bool
 
     init(
-        pause: Bool = false, failure: String? = nil, beforeReadReturns: (@Sendable () -> Void)? = nil,
-        rejectBeforeLaunch: Bool = false
+        pause: Bool = false, failure: HelperPowerProfile? = nil, beforeReadReturns: (@Sendable () -> Void)? = nil,
+        rejectBeforeLaunch: Bool = false, readFailure: HelperPowerProfile? = nil
     ) {
         self.pause = pause
         self.failure = failure
+        self.readFailure = readFailure
         self.beforeReadReturns = beforeReadReturns
         self.rejectBeforeLaunch = rejectBeforeLaunch
     }
 
-    func readMinutes(profile: String, lease: FileHandle, maintenance: FileHandle) throws -> Int {
-        let value = lock.withLock { values[profile]! }
+    func readMinutes(
+        profile: HelperPowerProfile, setting: HelperPowerSetting, lease: FileHandle, maintenance: FileHandle
+    ) throws -> Int {
+        let value = lock.withLock { reads += 1; return values[setting]![profile]! }
+        if profile == readFailure { throw HelperClientError.unavailable("Fake read failure") }
         beforeReadReturns?()
         return value
     }
 
     func write(_ change: IdleSleepChange, lease: FileHandle, maintenance: FileHandle) -> HelperCommandOutcome {
         if rejectBeforeLaunch {
-            return HelperCommandOutcome(profile: change.profile, exitCode: 1, message: "Not launched", didExecute: false)
+            return HelperCommandOutcome(
+                profile: change.profile, exitCode: 1, message: "Not launched", didExecute: false, setting: change.setting
+            )
         }
         entered.signal()
         if pause { release.wait() }
         return lock.withLock {
-            writes.append(change.profile)
+            writes.append(change)
             if change.profile == failure {
-                return HelperCommandOutcome(profile: change.profile, exitCode: 7, message: "Fake failure")
+                return HelperCommandOutcome(
+                    profile: change.profile, exitCode: 7, message: "Fake failure", setting: change.setting
+                )
             }
-            values[change.profile] = change.minutes
-            return HelperCommandOutcome(profile: change.profile, exitCode: 0)
+            values[change.setting]![change.profile] = change.minutes
+            return HelperCommandOutcome(profile: change.profile, exitCode: 0, setting: change.setting)
         }
     }
 
-    func written() -> [String] { lock.withLock { writes } }
+    func written() -> [HelperPowerProfile] { lock.withLock { writes.map(\.profile) } }
+    func writtenChanges() -> [IdleSleepChange] { lock.withLock { writes } }
+    func readCount() -> Int { lock.withLock { reads } }
+    func values(for setting: HelperPowerSetting) -> [HelperPowerProfile: Int] { lock.withLock { values[setting]! } }
 }
 
 private struct TestMaintenanceLock: MaintenanceLockProviding {
@@ -149,15 +165,15 @@ final class WorkerTests: XCTestCase {
     }
 
     func testMismatchDoesNotWriteAndPartialFailureReturnsEachProfile() throws {
-        let backend = FakeBackend(failure: "adapter")
+        let backend = FakeBackend(failure: .adapter)
         let worker = worker(backend: backend)
         let handle = try handle()
         defer { try? handle.close() }
         let done = expectation(description: "partial results")
         let box = OutcomeBox()
         try worker.submit([
-            IdleSleepChange(profile: "battery", minutes: 0, expectedMinutes: 99),
-            IdleSleepChange(profile: "adapter", minutes: 0, expectedMinutes: 5),
+            IdleSleepChange(profile: .battery, minutes: 0, expectedMinutes: 99),
+            IdleSleepChange(profile: .adapter, minutes: 0, expectedMinutes: 5),
         ], lease: handle, callerUID: getuid()) {
             box.add($0)
             done.fulfill()
@@ -165,7 +181,7 @@ final class WorkerTests: XCTestCase {
         wait(for: [done], timeout: 3)
         XCTAssertEqual(box.results().first?.map(\.exitCode), [75, 7])
         XCTAssertEqual(box.results().first?.map(\.didExecute), [false, true])
-        XCTAssertEqual(backend.written(), ["adapter"])
+        XCTAssertEqual(backend.written(), [.adapter])
         XCTAssertTrue(box.results()[0][0].message.contains("External change preserved"))
     }
 
@@ -177,7 +193,7 @@ final class WorkerTests: XCTestCase {
         let done = expectation(description: "completed rejection")
         let box = OutcomeBox()
         try worker.submit(
-            [IdleSleepChange(profile: "battery", minutes: 0, expectedMinutes: 1)],
+            [IdleSleepChange(profile: .battery, minutes: 0, expectedMinutes: 2, setting: .display)],
             lease: handle, callerUID: getuid()
         ) {
             box.add($0)
@@ -186,7 +202,181 @@ final class WorkerTests: XCTestCase {
         wait(for: [done], timeout: 3)
         XCTAssertEqual(box.results().first?.first?.didExecute, false)
         XCTAssertEqual(box.results().first?.first?.exitCode, 1)
+        XCTAssertEqual(box.results().first?.first?.setting, .display)
         XCTAssertTrue(backend.written().isEmpty)
+    }
+
+    func testDisplayPartialFailureKeepsSystemValuesSeparate() throws {
+        let backend = FakeBackend(failure: .adapter)
+        let worker = worker(backend: backend)
+        let handle = try handle()
+        defer { try? handle.close() }
+        let changes = [
+            IdleSleepChange(profile: .battery, minutes: 0, expectedMinutes: 2, setting: .display),
+            IdleSleepChange(profile: .adapter, minutes: 0, expectedMinutes: 10, setting: .display),
+        ]
+        let done = expectation(description: "display partial results")
+        let box = OutcomeBox()
+        try worker.submit(changes, lease: handle, callerUID: getuid()) {
+            box.add($0)
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 3)
+        XCTAssertEqual(box.results().first?.map(\.exitCode), [0, 7])
+        XCTAssertEqual(box.results().first?.map(\.didExecute), [true, true])
+        XCTAssertEqual(box.results().first?.map(\.setting), [.display, .display])
+        XCTAssertEqual(backend.writtenChanges(), changes)
+        XCTAssertEqual(backend.values(for: .display), [.battery: 0, .adapter: 10])
+        XCTAssertEqual(backend.values(for: .system), [.battery: 1, .adapter: 5])
+    }
+
+    func testDisplayExpectedValueCannotMatchSystemValueAndSkipDoesNotStopBatch() throws {
+        let backend = FakeBackend()
+        let worker = worker(backend: backend)
+        let handle = try handle()
+        defer { try? handle.close() }
+        let changes = [
+            IdleSleepChange(profile: .battery, minutes: 0, expectedMinutes: 1, setting: .display),
+            IdleSleepChange(profile: .adapter, minutes: 0, expectedMinutes: 10, setting: .display),
+        ]
+        let done = expectation(description: "display mismatch and success")
+        let box = OutcomeBox()
+        try worker.submit(changes, lease: handle, callerUID: getuid()) {
+            box.add($0)
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 3)
+        XCTAssertEqual(box.results().first?.map(\.exitCode), [75, 0])
+        XCTAssertEqual(box.results().first?.map(\.didExecute), [false, true])
+        XCTAssertEqual(box.results().first?.map(\.setting), [.display, .display])
+        XCTAssertTrue(box.results()[0][0].message.contains("found 2"))
+        XCTAssertEqual(backend.writtenChanges(), [changes[1]])
+        XCTAssertEqual(backend.values(for: .display), [.battery: 2, .adapter: 0])
+        XCTAssertEqual(backend.values(for: .system), [.battery: 1, .adapter: 5])
+    }
+
+    func testDisplayReadFailureSkipsOnlyThatProfile() throws {
+        let backend = FakeBackend(readFailure: .battery)
+        let worker = worker(backend: backend)
+        let handle = try handle()
+        defer { try? handle.close() }
+        let changes = [
+            IdleSleepChange(profile: .battery, minutes: 0, expectedMinutes: 2, setting: .display),
+            IdleSleepChange(profile: .adapter, minutes: 0, expectedMinutes: 10, setting: .display),
+        ]
+        let done = expectation(description: "display read failure")
+        let box = OutcomeBox()
+        try worker.submit(changes, lease: handle, callerUID: getuid()) {
+            box.add($0)
+            done.fulfill()
+        }
+        wait(for: [done], timeout: 3)
+        XCTAssertEqual(box.results().first?.map(\.exitCode), [1, 0])
+        XCTAssertEqual(box.results().first?.map(\.didExecute), [false, true])
+        XCTAssertEqual(box.results().first?.map(\.setting), [.display, .display])
+        XCTAssertEqual(backend.writtenChanges(), [changes[1]])
+        XCTAssertEqual(backend.values(for: .system), [.battery: 1, .adapter: 5])
+    }
+
+    func testSeparateSettingBatchesShareWorkerQueueWithoutChangingEachOther() throws {
+        let backend = FakeBackend(pause: true)
+        let worker = worker(backend: backend)
+        let handle = try handle()
+        defer { try? handle.close(); backend.release.signal() }
+        let system = IdleSleepChange(profile: .battery, minutes: 0, expectedMinutes: 1)
+        let display = IdleSleepChange(profile: .battery, minutes: 0, expectedMinutes: 2, setting: .display)
+        let first = expectation(description: "system batch")
+        let second = expectation(description: "display batch")
+        let box = OutcomeBox()
+        try worker.submit([system], lease: handle, callerUID: getuid()) { box.add($0); first.fulfill() }
+        XCTAssertEqual(backend.entered.wait(timeout: .now() + 3), .success)
+        try worker.submit([display], lease: handle, callerUID: getuid()) { box.add($0); second.fulfill() }
+        XCTAssertEqual(backend.entered.wait(timeout: .now() + 0.05), .timedOut)
+        backend.release.signal()
+        XCTAssertEqual(backend.entered.wait(timeout: .now() + 3), .success)
+        XCTAssertEqual(backend.values(for: .system), [.battery: 0, .adapter: 5])
+        XCTAssertEqual(backend.values(for: .display), [.battery: 2, .adapter: 10])
+        backend.release.signal()
+        wait(for: [first, second], timeout: 3)
+        XCTAssertEqual(box.results().map { $0[0].exitCode }, [0, 0])
+        XCTAssertEqual(box.results().map { $0[0].setting }, [.system, .display])
+        XCTAssertEqual(backend.writtenChanges(), [system, display])
+        XCTAssertEqual(backend.values(for: .system), [.battery: 0, .adapter: 5])
+        XCTAssertEqual(backend.values(for: .display), [.battery: 0, .adapter: 10])
+    }
+
+    func testLegacyAvailabilityAndWritesGetReadableRefusalWithoutLeasesOrBackendWork() throws {
+        let backend = FakeBackend()
+        let endpoint = HelperEndpoint(worker: worker(backend: backend), callerUID: getuid())
+        let sources = [
+            #"{"version":1,"changes":[{"profile":"battery","minutes":0,"expectedMinutes":1}]}"#,
+            #"{"version":1,"changes":[{"profile":"adapter","minutes":10,"expectedMinutes":5}]}"#,
+            #"{"version":1,"changes":[{"profile":"battery","setting":"display","minutes":0,"expectedMinutes":2}]}"#,
+            #"{"version":1,"changes":[{"profile":"battery","key":"displaysleep","minutes":0,"expectedMinutes":2}]}"#,
+            #"{"version":1,"changes":[{"profile":"battery","setting":"system","minutes":0,"expectedMinutes":1},{"profile":"adapter","setting":"display","minutes":0,"expectedMinutes":10}]}"#,
+        ]
+        let available = DataBox()
+        endpoint.availability(Data(#"{"version":1}"#.utf8)) { available.set($0) }
+        let status = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: XCTUnwrap(available.get())) as? [String: Any]
+        )
+        XCTAssertEqual(Set(status.keys), ["version", "state", "message"])
+        XCTAssertEqual(status["version"] as? Int, 1)
+        XCTAssertEqual(status["state"] as? String, "incompatible")
+        XCTAssertEqual(status["message"] as? String, HelperWireCodec.updateRequiredMessage)
+        for source in sources {
+            let response = DataBox()
+            // Even an invalid lease is untouched: legacy requests never reach worker admission.
+            endpoint.apply(Data(source.utf8), lease: .nullDevice) { response.set($0) }
+            let fields = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: XCTUnwrap(response.get())) as? [String: Any]
+            )
+            XCTAssertEqual(Set(fields.keys), ["version", "state", "message", "outcomes"])
+            XCTAssertEqual(fields["version"] as? Int, 1)
+            XCTAssertEqual(fields["state"] as? String, "incompatible")
+            XCTAssertEqual(fields["message"] as? String, HelperWireCodec.updateRequiredMessage)
+            XCTAssertEqual((fields["outcomes"] as? [Any])?.count, 0)
+        }
+        XCTAssertEqual(backend.readCount(), 0)
+        XCTAssertTrue(backend.written().isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: maintenance().path))
+    }
+
+    func testV2AvailabilityNeverReadsOrWritesPower() throws {
+        let backend = FakeBackend()
+        let endpoint = HelperEndpoint(worker: worker(backend: backend), callerUID: getuid())
+        let response = DataBox()
+        endpoint.availability(HelperWireCodec().availabilityRequest()) { response.set($0) }
+        let status = try HelperWireCodec().decodeStatusReply(XCTUnwrap(response.get()))
+        XCTAssertEqual(status.state, .ready)
+        XCTAssertEqual(backend.readCount(), 0)
+        XCTAssertTrue(backend.written().isEmpty)
+    }
+
+    func testMalformedDisplayRequestsAreRejectedBeforeBackendAndLeaseAdmission() throws {
+        let backend = FakeBackend()
+        let endpoint = HelperEndpoint(worker: worker(backend: backend), callerUID: getuid())
+        let sources = [
+            #"{"version":2,"changes":[{"profile":"ups","setting":"display","minutes":0,"expectedMinutes":2}]}"#,
+            #"{"version":2,"changes":[{"profile":"battery","setting":"displaysleep","minutes":0,"expectedMinutes":2}]}"#,
+            #"{"version":2,"changes":[{"profile":"battery","setting":"display","key":"sleep","minutes":0,"expectedMinutes":2}]}"#,
+            #"{"version":2,"changes":[{"profile":"battery","setting":"display","minutes":2147483648,"expectedMinutes":2}]}"#,
+            #"{"version":2,"changes":[{"profile":"battery","setting":"display","minutes":0,"expectedMinutes":-1}]}"#,
+            #"{"version":2,"changes":[{"profile":"battery","minutes":0,"expectedMinutes":2}]}"#,
+            #"{"version":2,"changes":[{"profile":"battery","setting":"system","minutes":0,"expectedMinutes":1},{"profile":"adapter","setting":"display","minutes":0,"expectedMinutes":10}]}"#,
+        ]
+        let pending = [IdleSleepChange(profile: .battery, minutes: 0, expectedMinutes: 2, setting: .display)]
+        for source in sources {
+            let response = DataBox()
+            endpoint.apply(Data(source.utf8), lease: .nullDevice) { response.set($0) }
+            let outcomes = try HelperClient().decodeApplyResponse(XCTUnwrap(response.get()), changes: pending)
+            XCTAssertEqual(outcomes.first?.setting, .display)
+            XCTAssertEqual(outcomes.first?.didExecute, false)
+            XCTAssertEqual(outcomes.first?.exitCode, 1)
+        }
+        XCTAssertEqual(backend.readCount(), 0)
+        XCTAssertTrue(backend.written().isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: maintenance().path))
     }
 
     func testHarmlessChildKeepsLeaseAfterBothParentDescriptorsClose() throws {
@@ -255,7 +445,7 @@ final class WorkerTests: XCTestCase {
         let worker = worker(backend: backend)
         let journal = try handle()
         defer { try? journal.close(); backend.release.signal() }
-        let changes = [IdleSleepChange(profile: "battery", minutes: 0, expectedMinutes: 1)]
+        let changes = [IdleSleepChange(profile: .battery, minutes: 0, expectedMinutes: 1)]
         let done = expectation(description: "in-flight operation")
         try worker.submit(changes, lease: journal, callerUID: getuid()) { _ in done.fulfill() }
         XCTAssertEqual(backend.entered.wait(timeout: .now() + 3), .success)
@@ -274,16 +464,16 @@ final class WorkerTests: XCTestCase {
         XCTAssertThrowsError(try worker.checkAvailability())
         XCTAssertThrowsError(try worker.submit(changes, lease: journal, callerUID: getuid()) { _ in })
         close(installer)
-        XCTAssertEqual(backend.written(), ["battery"])
+        XCTAssertEqual(backend.written(), [.battery])
         try worker.checkAvailability()
         let resumed = expectation(description: "writes resume after exclusive lock closes")
         backend.release.signal()
         try worker.submit(
-            [IdleSleepChange(profile: "battery", minutes: 1, expectedMinutes: 0)],
+            [IdleSleepChange(profile: .battery, minutes: 1, expectedMinutes: 0)],
             lease: journal, callerUID: getuid()
         ) { _ in resumed.fulfill() }
         wait(for: [resumed], timeout: 3)
-        XCTAssertEqual(backend.written(), ["battery", "battery"])
+        XCTAssertEqual(backend.written(), [.battery, .battery])
     }
 
     func testInstallerRecordIsNotAHelperWriteBarrier() throws {
@@ -297,7 +487,7 @@ final class WorkerTests: XCTestCase {
         let done = expectation(description: "installer record does not block write")
         let box = OutcomeBox()
         try worker.submit(
-            [IdleSleepChange(profile: "battery", minutes: 0, expectedMinutes: 1)],
+            [IdleSleepChange(profile: .battery, minutes: 0, expectedMinutes: 1)],
             lease: journal, callerUID: getuid()
         ) {
             box.add($0)
@@ -305,7 +495,7 @@ final class WorkerTests: XCTestCase {
         }
         wait(for: [done], timeout: 3)
         XCTAssertTrue(FileManager.default.fileExists(atPath: marker))
-        XCTAssertEqual(backend.written(), ["battery"])
+        XCTAssertEqual(backend.written(), [.battery])
         XCTAssertEqual(box.results().first?.first?.didExecute, true)
         XCTAssertEqual(box.results().first?.first?.exitCode, 0)
         try worker.checkAvailability()
@@ -319,7 +509,7 @@ final class WorkerTests: XCTestCase {
         let first = expectation(description: "first")
         let second = expectation(description: "second")
         let box = OutcomeBox()
-        let change = [IdleSleepChange(profile: "battery", minutes: 0, expectedMinutes: 1)]
+        let change = [IdleSleepChange(profile: .battery, minutes: 0, expectedMinutes: 1)]
         try worker.submit(change, lease: handle, callerUID: getuid()) { box.add($0); first.fulfill() }
         XCTAssertEqual(backend.entered.wait(timeout: .now() + 3), .success)
         try worker.submit(change, lease: handle, callerUID: getuid()) { box.add($0); second.fulfill() }
@@ -333,7 +523,7 @@ final class WorkerTests: XCTestCase {
         wait(for: [first, second], timeout: 3)
         // The second batch performs its precondition read only after the first completes.
         XCTAssertEqual(box.results().map { $0[0].exitCode }, [0, 75])
-        XCTAssertEqual(backend.written(), ["battery"])
+        XCTAssertEqual(backend.written(), [.battery])
         var acquired = false
         for _ in 0..<100 {
             if flock(observer.fileDescriptor, LOCK_EX | LOCK_NB) == 0 { acquired = true; break }
@@ -348,10 +538,14 @@ final class WorkerTests: XCTestCase {
         let handle = try handle()
         defer { try? handle.close() }
         XCTAssertThrowsError(try worker.submit(
-            [IdleSleepChange(profile: "ups", minutes: 0, expectedMinutes: 1)],
+            [
+                IdleSleepChange(profile: .battery, minutes: 0, expectedMinutes: 1),
+                IdleSleepChange(profile: .adapter, minutes: 0, expectedMinutes: 10, setting: .display),
+            ],
             lease: handle, callerUID: getuid(), completion: { _ in }
         ))
         XCTAssertTrue(backend.written().isEmpty)
+        XCTAssertEqual(backend.readCount(), 0)
     }
 
     func testActualHelperInterfaceOverAnonymousXPCWithFakeBackend() throws {
@@ -382,8 +576,8 @@ final class WorkerTests: XCTestCase {
         defer { try? handle.close() }
         XCTAssertEqual(flock(handle.fileDescriptor, LOCK_EX | LOCK_NB), 0)
         let changes = [
-            IdleSleepChange(profile: "battery", minutes: 0, expectedMinutes: 1),
-            IdleSleepChange(profile: "adapter", minutes: 10, expectedMinutes: 5),
+            IdleSleepChange(profile: .battery, minutes: 0, expectedMinutes: 2, setting: .display),
+            IdleSleepChange(profile: .adapter, minutes: 15, expectedMinutes: 10, setting: .display),
         ]
         proxy.apply(try HelperWireCodec().applyRequest(changes), lease: handle) {
             response.set($0)
@@ -393,7 +587,9 @@ final class WorkerTests: XCTestCase {
         let data = try XCTUnwrap(response.get())
         let outcomes = try HelperWireCodec().decodeApplyReply(data, changes: changes)
         XCTAssertEqual(outcomes.map(\.exitCode), [0, 0])
-        XCTAssertEqual(backend.written(), ["battery", "adapter"])
+        XCTAssertEqual(outcomes.map(\.setting), [.display, .display])
+        XCTAssertEqual(backend.writtenChanges(), changes)
+        XCTAssertEqual(backend.values(for: .system), [.battery: 1, .adapter: 5])
     }
 
     func testXPCInvalidationDoesNotReleaseRunningWorkerLease() throws {
@@ -419,7 +615,7 @@ final class WorkerTests: XCTestCase {
         let handle = try handle()
         XCTAssertEqual(flock(handle.fileDescriptor, LOCK_EX | LOCK_NB), 0)
         proxy.apply(try HelperWireCodec().applyRequest([
-            IdleSleepChange(profile: "battery", minutes: 0, expectedMinutes: 1),
+            IdleSleepChange(profile: .battery, minutes: 0, expectedMinutes: 1),
         ]), lease: handle) { _ in }
         XCTAssertEqual(backend.entered.wait(timeout: .now() + 3), .success)
         connection.invalidate()
@@ -434,7 +630,7 @@ final class WorkerTests: XCTestCase {
             Thread.sleep(forTimeInterval: 0.01)
         }
         XCTAssertTrue(acquired)
-        XCTAssertEqual(backend.written(), ["battery"])
+        XCTAssertEqual(backend.written(), [.battery])
     }
 
     private func currentProcessRequirement() throws -> ValidatedCodeRequirement {

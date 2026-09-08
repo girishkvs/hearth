@@ -33,7 +33,12 @@ private struct HearthHelperDaemon {
         let policy = try installation.loadPolicy()
         try installation.validateDaemonFiles(policy: policy)
         let worker = HelperWorker(backend: PMSetBackend(), maintenance: ProtectedMaintenanceLock())
-        let delegate = HelperListenerDelegate(worker: worker, requirement: policy.clientsRequirement)
+        let appRequirement = try ValidatedCodeRequirement(
+            #"identifier "dev.girishkvs.hearth" and cdhash H"\#(policy.appCodeHash)""#
+        )
+        let delegate = HelperListenerDelegate(
+            worker: worker, requirement: policy.clientsRequirement, appRequirement: appRequirement
+        )
         let listener = NSXPCListener(machServiceName: HelperInstallation.serviceName)
         listener.setConnectionCodeSigningRequirement(policy.clientsRequirement.text)
         listener.delegate = delegate

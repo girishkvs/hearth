@@ -27,6 +27,20 @@ final class CommandLineTests: XCTestCase {
         )
     }
 
+    func testLockCommandsAreCurrentUserOnly() throws {
+        XCTAssertEqual(try CommandLineParser().parse(["lock", "on"]), .lock(IdleLockRequest(action: .on)))
+        XCTAssertEqual(try CommandLineParser().parse(["lock", "restore"]), .lock(IdleLockRequest(action: .restore)))
+        XCTAssertEqual(try CommandLineParser().parse(["lock", "status"]), .lockStatus)
+        for arguments in [
+            ["lock"], ["lock", "off"], ["lock", "setup"], ["lock", "authorize"], ["lock", "sleep"],
+            ["lock", "on", "--power", "both"], ["lock", "restore", "--power", "battery"],
+            ["lock", "status", "--json"], ["lock", "on", "--setting", "display"],
+            ["lock", "on", "--minutes", "10"], ["lock", "on", "restore"], ["lock", "ON"],
+        ] {
+            XCTAssertThrowsError(try CommandLineParser().parse(arguments), "\(arguments)")
+        }
+    }
+
     func testRejectsAmbiguousOrInvalidInputBeforeAnyEffects() {
         for args in [
             ["on", "--power", "ups"], ["on", "--minutes", "10"], ["restore", "--minutes", "1"],
@@ -37,9 +51,35 @@ final class CommandLineTests: XCTestCase {
             ["status", "--power", "both"], ["status", "--json", "--json"],
             ["web", "--port", "-1"], ["web", "--port", "65536"], ["web", "--host", "0.0.0.0"],
             ["web", "--no-open", "--no-open"], ["help", "on"], ["unknown"],
+            ["on", "--setting", "both"], ["on", "--setting", "Display"],
+            ["on", "--setting", ""], ["on", "--setting"],
+            ["on", "--setting", "display", "--setting", "system"],
+            ["restore", "--setting", "display", "--minutes", "10"],
+            ["status", "--setting", "display"], ["web", "--setting", "display"],
+            ["sleep", "--setting", "display", "--minutes", "0"],
         ] {
             XCTAssertThrowsError(try CommandLineParser().parse(args), "\(args)")
         }
+    }
+
+    func testSettingIsExplicitAndIndependentOfPowerTarget() throws {
+        for setting in PowerSetting.allCases {
+            for target in PowerTarget.allCases {
+                for (command, action) in [("on", PowerAction.on), ("restore", .restore), ("off", .restore), ("sleep", .sleep)] {
+                    let minutes = action == .sleep ? 12 : nil
+                    var arguments = [command, "--setting", setting.rawValue, "--power", target.rawValue]
+                    if let minutes { arguments += ["--minutes", String(minutes)] }
+                    XCTAssertEqual(
+                        try CommandLineParser().parse(arguments),
+                        .power(try PowerRequest(action: action, target: target, minutes: minutes, setting: setting))
+                    )
+                }
+            }
+        }
+        XCTAssertEqual(
+            try CommandLineParser().parse(["on", "--setting", "display"]),
+            .power(try PowerRequest(action: .on, setting: .display))
+        )
     }
 
     func testWebOptions() throws {
@@ -66,5 +106,8 @@ final class CommandLineTests: XCTestCase {
         XCTAssertTrue(instructions.contains("revoked, missing, or incompatible"))
         XCTAssertTrue(instructions.contains("does not guarantee"))
         XCTAssertTrue(instructions.contains("scripts/uninstall.sh --restored --gui"))
+        XCTAssertFalse(instructions.contains("Enable Lock controls"))
+        XCTAssertTrue(instructions.contains("no Automation setup is needed"))
+        XCTAssertTrue(instructions.contains("Helper installation is separate"))
     }
 }

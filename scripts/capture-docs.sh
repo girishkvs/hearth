@@ -12,7 +12,7 @@ HEARTH_WEB_PREVIEW_DIR="$temporary" HEARTH_INSTALLER_PREVIEW_DIR="$temporary" \
     /usr/bin/swift test --disable-automatic-resolution --filter 'HearthPageTests|InstallerPageTests'
 /usr/bin/swift build --disable-automatic-resolution --product HearthApp
 .build/debug/HearthApp --capture-docs "$temporary"
-for image in native-menu-default native-menu-active ready advanced keeping-awake introduction-light read-me-dark first-launch-light terminal-progress-dark; do
+for image in native-menu-default native-menu-lock-configured native-controls-default native-controls-display-active native-controls-lock-unavailable ready advanced keeping-awake lock-active lock-unconfirmed lock-recovery lock-unavailable introduction-light read-me-dark first-launch-light terminal-progress-dark; do
     cp "$temporary/$image.png" "$root/docs/images/$image.png"
 done
 /usr/bin/swift "$root/scripts/strip-image-metadata.swift" "$root"/docs/images/*.png

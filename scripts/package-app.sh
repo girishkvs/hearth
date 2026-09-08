@@ -62,7 +62,7 @@ sign_local_binary "$app/Contents/MacOS/hearth" dev.girishkvs.hearth.cli
 # The app signature seals the already finalized nested CLI. No manifest is added inside the app.
 require_native_binary "$app/Contents/MacOS/HearthApp"
 /usr/bin/codesign --force --sign - --timestamp=none --options runtime \
-    --entitlements "$root/Packaging/EmptyEntitlements.plist" --identifier dev.girishkvs.hearth "$app"
+    --identifier dev.girishkvs.hearth "$app"
 /usr/bin/codesign --verify --strict "$app"
 mv "$app" "$output"
 printf 'Packaged %s (local ad-hoc signature; NOT notarized or publisher-authenticated).\n' "$output"

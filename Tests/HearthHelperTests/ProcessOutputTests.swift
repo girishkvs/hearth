@@ -4,7 +4,7 @@ import XCTest
 @testable import HearthHelper
 
 final class ProcessOutputTests: XCTestCase {
-    func testReadOnlyBackendCompletesWithEOFAndDoesNotTouchLeaseContents() throws {
+    func testFakeReadOnlyBackendDoesNotTouchLeaseContents() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("hearth-output-test-\(UUID())")
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -16,17 +16,12 @@ final class ProcessOutputTests: XCTestCase {
         let journal = try FileHandle(forUpdating: journalPath)
         let maintenance = try FileHandle(forUpdating: maintenancePath)
         defer { try? journal.close(); try? maintenance.close() }
-        let finished = expectation(description: "read-only pmset drains and returns")
-        DispatchQueue.global().async {
-            defer { finished.fulfill() }
-            do {
-                let value = try PMSetBackend().readMinutes(profile: "adapter", lease: journal, maintenance: maintenance)
-                XCTAssertGreaterThanOrEqual(value, 0)
-            } catch {
-                XCTFail("Read-only backend failed: \(error)")
-            }
-        }
-        wait(for: [finished], timeout: 5)
+        let process = FakePMSetProcess(output: "AC Power:\n sleep 5\n displaysleep 10\n")
+        let value = try PMSetBackend(process: process).readMinutes(
+            profile: .adapter, setting: .display, lease: journal, maintenance: maintenance
+        )
+        XCTAssertEqual(value, 10)
+        XCTAssertEqual(process.recorded(), [.read])
         XCTAssertEqual(try Data(contentsOf: journalPath), contents)
         XCTAssertEqual(try Data(contentsOf: maintenancePath), contents)
     }

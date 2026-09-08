@@ -3,6 +3,12 @@ import Foundation
 @objc public protocol HearthHelperXPC {
     func availability(_ request: Data, reply: @escaping @Sendable (Data) -> Void)
     func apply(_ request: Data, lease: FileHandle, reply: @escaping @Sendable (Data) -> Void)
+    func publisherEndpoint(reply: @escaping @Sendable (NSXPCListenerEndpoint?) -> Void)
+    func lockEndpoint(reply: @escaping @Sendable (NSXPCListenerEndpoint?) -> Void)
+}
+
+@objc public protocol HearthLockPublisherXPC {
+    func publishLockEndpoint(_ endpoint: NSXPCListenerEndpoint, reply: @escaping @Sendable (Bool) -> Void)
 }
 
 public struct HelperXPCInterface {
@@ -19,27 +25,54 @@ public struct HelperXPCInterface {
         interface.setClasses(dataClasses, for: apply, argumentIndex: 0, ofReply: false)
         interface.setClasses(handleClasses, for: apply, argumentIndex: 1, ofReply: false)
         interface.setClasses(dataClasses, for: apply, argumentIndex: 0, ofReply: true)
+        let endpointClasses = NSSet(object: NSXPCListenerEndpoint.self) as! Set<AnyHashable>
+        interface.setClasses(
+            endpointClasses, for: #selector(HearthHelperXPC.publisherEndpoint(reply:)),
+            argumentIndex: 0, ofReply: true
+        )
+        interface.setClasses(
+            endpointClasses, for: #selector(HearthHelperXPC.lockEndpoint(reply:)),
+            argumentIndex: 0, ofReply: true
+        )
+        return interface
+    }
+}
+
+public struct LockPublisherXPCInterface {
+    public init() {}
+
+    public func make() -> NSXPCInterface {
+        let interface = NSXPCInterface(with: HearthLockPublisherXPC.self)
+        let endpointClasses = NSSet(object: NSXPCListenerEndpoint.self) as! Set<AnyHashable>
+        interface.setClasses(
+            endpointClasses, for: #selector(HearthLockPublisherXPC.publishLockEndpoint(_:reply:)),
+            argumentIndex: 0, ofReply: false
+        )
         return interface
     }
 }
 
 public struct HelperWireCodec: Sendable {
+    public static let version = 2
+    public static let updateRequiredMessage =
+        "Hearth update required. Run explicit setup/repair with matching Hearth app, CLI, and helper."
+
     public init() {}
 
     public func validate(_ changes: [IdleSleepChange]) throws {
         guard (1...2).contains(changes.count) else { throw invalid("Expected one or two changes.") }
-        var profiles = Set<String>()
+        var profiles = Set<HelperPowerProfile>()
         for change in changes {
-            guard ["battery", "adapter"].contains(change.profile),
-                  profiles.insert(change.profile).inserted,
+            guard profiles.insert(change.profile).inserted,
+                  change.setting == changes[0].setting,
                   (0...Int(Int32.max)).contains(change.minutes),
                   (0...Int(Int32.max)).contains(change.expectedMinutes) else {
-                throw invalid("Invalid profile, duplicate profile, or timeout.")
+                throw invalid("Duplicate profile, mixed settings, or invalid timeout.")
             }
         }
     }
 
-    public func availabilityRequest() -> Data { Data(#"{"version":1}"#.utf8) }
+    public func availabilityRequest() -> Data { Data(#"{"version":2}"#.utf8) }
 
     public func decodeAvailabilityRequest(_ data: Data) throws {
         _ = try envelope(data, keys: ["version"])
@@ -48,9 +81,12 @@ public struct HelperWireCodec: Sendable {
     public func applyRequest(_ changes: [IdleSleepChange]) throws -> Data {
         try validate(changes)
         return try encode([
-            "version": 1,
+            "version": Self.version,
             "changes": changes.map {
-                ["profile": $0.profile, "minutes": $0.minutes, "expectedMinutes": $0.expectedMinutes] as [String: Any]
+                [
+                    "profile": $0.profile.rawValue, "setting": $0.setting.rawValue,
+                    "minutes": $0.minutes, "expectedMinutes": $0.expectedMinutes,
+                ] as [String: Any]
             },
         ])
     }
@@ -60,13 +96,16 @@ public struct HelperWireCodec: Sendable {
         guard case .array(let items) = object["changes"] else { throw invalid("Missing changes.") }
         let changes = try items.map { item -> IdleSleepChange in
             guard case .object(let fields) = item,
-                  Set(fields.keys) == ["profile", "minutes", "expectedMinutes"],
-                  case .string(let profile) = fields["profile"],
+                  Set(fields.keys) == ["profile", "setting", "minutes", "expectedMinutes"],
+                  case .string(let profileName) = fields["profile"],
+                  let profile = HelperPowerProfile(rawValue: profileName),
+                  case .string(let settingName) = fields["setting"],
+                  let setting = HelperPowerSetting(rawValue: settingName),
                   case .integer(let minutes) = fields["minutes"],
                   case .integer(let expected) = fields["expectedMinutes"] else {
                 throw invalid("Invalid change fields.")
             }
-            return IdleSleepChange(profile: profile, minutes: minutes, expectedMinutes: expected)
+            return IdleSleepChange(profile: profile, minutes: minutes, expectedMinutes: expected, setting: setting)
         }
         try validate(changes)
         return changes
@@ -74,30 +113,45 @@ public struct HelperWireCodec: Sendable {
 
     public func statusReply(_ status: HelperConnectionStatus) -> Data {
         // All fields are bounded before encoding; the fallback is itself a valid failure envelope.
-        (try? encode(["version": 1, "state": status.state.rawValue, "message": bounded(status.message)])) ??
-            Data(#"{"version":1,"state":"unavailable","message":"Reply encoding failed."}"#.utf8)
+        (try? encode(["version": Self.version, "state": status.state.rawValue, "message": bounded(status.message)])) ??
+            Data(#"{"version":2,"state":"unavailable","message":"Reply encoding failed."}"#.utf8)
     }
 
     public func decodeStatusReply(_ data: Data) throws -> HelperConnectionStatus {
         try status(envelope(data, keys: ["version", "state", "message"]))
     }
 
+    // Only a fixed refusal may use the old envelope. Legacy changes are never decoded or queued.
+    public func legacyIncompatibilityReply(to request: Data, applying: Bool) -> Data? {
+        var parser = StrictWireJSON(data: request)
+        guard let value = try? parser.parse(),
+              case .object(let object) = value,
+              case .integer(1) = object["version"] else { return nil }
+        var reply: [String: Any] = [
+            "version": 1, "state": "incompatible", "message": Self.updateRequiredMessage,
+        ]
+        if applying { reply["outcomes"] = [] as [Any] }
+        return try? encode(reply)
+    }
+
     public func applyReply(_ outcomes: [HelperCommandOutcome], failure: HelperConnectionStatus? = nil) -> Data {
         let status = failure ?? HelperConnectionStatus(state: .ready, message: "")
         let entries: [[String: Any]] = outcomes.prefix(2).map {
             [
-                "profile": $0.profile, "exitCode": $0.exitCode.map { $0 as Any } ?? NSNull(),
+                "profile": $0.profile.rawValue, "setting": $0.setting.rawValue,
+                "exitCode": $0.exitCode.map { $0 as Any } ?? NSNull(),
                 "message": bounded($0.message), "didExecute": $0.didExecute,
             ]
         }
         // If encoding ever fails after work, an incomplete outcome list must become
         // completionUnknown at the client, never a false "rejected before work".
         return (try? encode([
-            "version": 1, "state": status.state.rawValue, "message": bounded(status.message), "outcomes": entries,
-        ])) ?? Data(#"{"version":1,"state":"ready","message":"Reply encoding failed.","outcomes":[]}"#.utf8)
+            "version": Self.version, "state": status.state.rawValue, "message": bounded(status.message), "outcomes": entries,
+        ])) ?? Data(#"{"version":2,"state":"ready","message":"Reply encoding failed.","outcomes":[]}"#.utf8)
     }
 
     public func decodeApplyReply(_ data: Data, changes: [IdleSleepChange]) throws -> [HelperCommandOutcome] {
+        try validate(changes)
         let object = try envelope(data, keys: ["version", "state", "message", "outcomes"])
         let result = try status(object)
         guard case .array(let entries) = object["outcomes"] else { throw invalid("Missing outcomes.") }
@@ -108,9 +162,13 @@ public struct HelperWireCodec: Sendable {
         guard entries.count == changes.count else { throw invalid("Incomplete helper reply.") }
         return try zip(entries, changes).map { entry, change in
             guard case .object(let fields) = entry,
-                  Set(fields.keys) == ["profile", "exitCode", "message", "didExecute"],
-                  case .string(let profile) = fields["profile"],
+                  Set(fields.keys) == ["profile", "setting", "exitCode", "message", "didExecute"],
+                  case .string(let profileName) = fields["profile"],
+                  let profile = HelperPowerProfile(rawValue: profileName),
                   profile == change.profile,
+                  case .string(let settingName) = fields["setting"],
+                  let setting = HelperPowerSetting(rawValue: settingName),
+                  setting == change.setting,
                   case .string(let message) = fields["message"],
                   case .boolean(let didExecute) = fields["didExecute"] else {
                 throw invalid("Invalid outcome fields.")
@@ -122,17 +180,18 @@ public struct HelperWireCodec: Sendable {
             default: throw invalid("Invalid exit status.")
             }
             guard didExecute || exitCode != 0 else { throw invalid("A skipped write cannot report success.") }
-            return HelperCommandOutcome(profile: profile, exitCode: exitCode, message: message, didExecute: didExecute)
+            return HelperCommandOutcome(
+                profile: profile, exitCode: exitCode, message: message, didExecute: didExecute, setting: setting
+            )
         }
     }
 
     private func envelope(_ data: Data, keys: Set<String>) throws -> [String: WireValue] {
         var parser = StrictWireJSON(data: data)
         guard case .object(let object) = try parser.parse(),
-              Set(object.keys) == keys,
-              case .integer(1) = object["version"] else {
-            throw invalid("Unsupported helper protocol or fields. Run explicit setup/repair.")
-        }
+              case .integer(let version) = object["version"] else { throw invalid("Invalid helper protocol fields.") }
+        guard version == Self.version else { throw invalid(Self.updateRequiredMessage) }
+        guard Set(object.keys) == keys else { throw invalid("Unsupported helper fields. Run explicit setup/repair.") }
         return object
     }
 

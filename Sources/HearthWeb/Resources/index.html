@@ -9,7 +9,7 @@
 :root { color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, sans-serif; color: #202832; background: #f5f6f8; --surface: #fff; --line: #d3d9e1; --muted: #586576; --accent: #165fc4; --button-text: #fff; --error: #a3212c; }
 * { box-sizing: border-box; }
 body { margin: 0; padding: 24px 16px; line-height: 1.4; }
-main { max-width: 400px; margin: auto; }
+main { max-width: 480px; margin: auto; }
 h1 { font-size: 16px; margin: 0 0 18px; }
 h2 { font-size: 16px; line-height: 1.3; margin: 0 0 6px; }
 h3, legend { font-size: 14px; font-weight: 600; margin: 0 0 8px; }
@@ -17,15 +17,22 @@ p { margin: 0; }
 button, input, select { font: inherit; }
 button, select, input { color: inherit; background: var(--surface); border: 1px solid var(--line); border-radius: 7px; }
 button { padding: 9px 14px; cursor: pointer; }
+button:not(:disabled):hover { filter: brightness(.94); }
+button:not(:disabled):active { filter: brightness(.88); }
 button:disabled { opacity: .5; cursor: not-allowed; }
 button:focus-visible, summary:focus-visible, input:focus-visible, select:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
-#keep-awake { min-height: 36px; margin-top: 14px; font-size: 14px; font-weight: 600; background: var(--accent); color: var(--button-text); border-color: var(--accent); }
-#actual, #action-note, #activity, footer, .detail { color: var(--muted); font-size: 14px; }
-#action-note { margin-top: 10px; }
+.setting-row { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 6px 14px; padding: 14px 0; }
+.setting-row + .setting-row { border-top: 1px solid var(--line); }
+.setting-row h2 { margin: 0; }
+.setting-row .actual, .setting-note { grid-column: 1 / -1; color: var(--muted); font-size: 14px; }
+.setting-action { grid-column: 2; grid-row: 1; min-height: 38px; font-size: 14px; font-weight: 600; background: var(--accent); color: var(--button-text); border-color: var(--accent); }
+.setting-note { font-size: 12px; }
+#action-note, #activity, footer, .detail { color: var(--muted); font-size: 14px; }
+#action-note { font-size: 12px; }
 .status-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 16px; }
 #activity { margin-top: 10px; }
 #refresh { border: 0; background: none; color: var(--accent); padding: 4px 0; font-size: 13px; flex-shrink: 0; }
-#error { margin-top: 16px; padding-left: 12px; border-left: 3px solid var(--error); color: var(--error); font-size: 14px; overflow-wrap: anywhere; }
+#error { margin-top: 16px; color: var(--error); font-size: 14px; overflow-wrap: anywhere; }
 #error p + p { margin-top: 8px; }
 #diagnostics { margin-top: 10px; font-size: 12px; overflow-wrap: anywhere; }
 #diagnostics summary { font-size: 12px; font-weight: 400; }
@@ -37,6 +44,8 @@ fieldset { border: 0; margin: 20px 0; padding: 0; }
 select { padding: 8px 10px; width: 100%; }
 .timeout { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .timeout-heading { margin-top: 20px; }
+#timeout-setting { margin-bottom: 12px; }
+.timeout-label { display: block; font-size: 14px; margin-bottom: 6px; }
 #minutes { width: 90px; padding: 8px; }
 .detail { margin-top: 8px; }
 .profile { margin: 14px 0; font-size: 14px; }
@@ -56,11 +65,28 @@ footer { margin-top: 24px; font-size: 12px; }
 <body>
 <main>
   <h1>Hearth</h1>
-  <section aria-label="Keep awake">
-    <h2 id="state" aria-live="polite">Checking settings...</h2>
-    <p id="actual">Reading battery and adapter settings.</p>
-    <button id="keep-awake" type="button" disabled>Keep awake</button>
-    <p id="action-note">Both power sources are selected by default.</p>
+  <section aria-label="Idle sleep settings">
+    <p id="action-note">For battery and adapter.</p>
+    <section class="setting-row" aria-labelledby="state">
+      <h2 id="state">System</h2>
+      <p id="actual" class="actual" aria-live="polite">Checking settings...</p>
+      <button id="keep-awake" class="setting-action" type="button" disabled>Keep awake</button>
+      <p id="system-note" class="setting-note" hidden></p>
+    </section>
+    <section class="setting-row" aria-labelledby="display-state">
+      <h2 id="display-state">Display</h2>
+      <p id="display-actual" class="actual" aria-live="polite">Checking settings...</p>
+      <button id="keep-display-on" class="setting-action" type="button" disabled>Keep display on</button>
+      <p id="display-note" class="setting-note" hidden></p>
+    </section>
+    <section class="setting-row" aria-labelledby="lock-state">
+      <h2 id="lock-state">Lock</h2>
+      <p id="lock-actual" class="actual" aria-live="polite">Checking settings...</p>
+      <button id="prevent-lock" class="setting-action" type="button" disabled>Prevent idle lock</button>
+      <p class="setting-note">Current user · all sources · keeps System/Display awake</p>
+      <p class="setting-note">macOS may adopt or restore the timer later.</p>
+      <p id="lock-note" class="setting-note"></p>
+    </section>
     <p id="activity" role="status">Connecting...</p>
     <div id="error" role="alert" hidden></div>
     <details id="diagnostics" hidden><summary>Diagnostic details</summary><div id="error-detail"></div></details>
@@ -79,8 +105,13 @@ footer { margin-top: 24px; font-size: 12px; }
         <option value="adapter">Adapter</option>
       </select>
     </fieldset>
+    <h3 class="timeout-heading">Set a sleep timeout</h3>
+    <label class="timeout-label" for="timeout-setting">Setting</label>
+    <select id="timeout-setting">
+      <option value="system" selected>System</option>
+      <option value="display">Display</option>
+    </select>
     <fieldset id="controls" disabled>
-      <h3 class="timeout-heading">Set a sleep timeout</h3>
       <div class="timeout">
         <input id="minutes" aria-label="Sleep timeout in minutes" type="number" inputmode="numeric" min="1" max="2147483647" step="1" placeholder="10">
         <span>minutes</span>
@@ -93,6 +124,15 @@ footer { margin-top: 24px; font-size: 12px; }
     <p id="source" class="detail"></p>
     <p id="helper-heading" class="detail">Helper not yet checked.</p>
     <p id="helper-message" class="detail"></p>
+    <p id="lock-details" class="detail"></p>
+    <p class="detail">Configured settings and readback do not prove immediate macOS timer adoption.</p>
+    <p id="lock-saver-values" class="detail"></p>
+    <section id="lock-recovery" hidden>
+      <h3>Unconfirmed Lock change</h3>
+      <p class="detail">Unconfirmed does not mean cancelled or unchanged. Lock, Restore Lock and required System/Display changes are blocked; original values are retained.</p>
+      <p class="detail">First preserve <code>~/Library/Application Support/Hearth/state.json</code>. Then collect <code>hearth status --json</code> and the last error for a recovery review with <code>girish.sai1@gmail.com</code>. Status does not retry the write; redact private paths before sharing.</p>
+      <p class="detail">Do not clear state or treat restart, logout, reboot or matching readings as proof of completion.</p>
+    </section>
     <ul id="outcomes" hidden></ul>
     <details id="setup-instructions">
       <summary>Setup or repair</summary>
@@ -102,11 +142,15 @@ footer { margin-top: 24px; font-size: 12px; }
       This page never opens Installer or asks for a password.</p>
       <p>Use <code>scripts/uninstall.sh --keep-settings --gui</code> (or <code>--cli</code>) for explicit removal.
       Setup, repair, and updates may require administrator approval; everyday controls do not.</p>
+      <p>Lock uses public current-user preferences; no Automation setup is needed.
+      CLI and web use the verified Hearth app as one serialized current-user writer.
+      Helper installation is separate and supports System/Display power changes.</p>
     </details>
     <p class="detail">Hearth controls idle sleep only. Lid closure, manual sleep, critical battery,
     system safety behavior, and other apps' sleep assertions are unchanged.</p>
   </details>
-  <footer>Display can turn off.</footer>
+  <footer>Manual lock, passwords, authentication, lid closure, and system safety behavior are unchanged.
+  Closing this page keeps all settings.</footer>
 </main>
 <script>
 (() => {
@@ -122,9 +166,13 @@ footer { margin-top: 24px; font-size: 12px; }
   }
   if (!/^[0-9a-f]{64}$/.test(token)) token = "";
 
-  const primary = document.getElementById("keep-awake");
+  const settings = {
+    system: { label: "System", action: "Keep awake", button: "keep-awake", actual: "actual" },
+    display: { label: "Display", action: "Keep display on", button: "keep-display-on", actual: "display-actual" }
+  };
   const controls = document.getElementById("controls");
   const target = document.getElementById("target");
+  const timeoutSetting = document.getElementById("timeout-setting");
   const refreshButton = document.getElementById("refresh");
   const activity = document.getElementById("activity");
   const error = document.getElementById("error");
@@ -132,12 +180,13 @@ footer { margin-top: 24px; font-size: 12px; }
   let status = null;
   let hasStatus = false;
   let writing = false;
+  let writingSetting = null;
   let refreshing = false;
   let refreshController = null;
   let generation = 0;
-  let actionError = "";
+  const actionErrors = {};
   let statusError = "";
-  let actionDetails = "";
+  const actionDetails = {};
   let statusDetails = "";
   let lastAction = "";
   const warnings = new Set();
@@ -149,24 +198,62 @@ footer { margin-top: 24px; font-size: 12px; }
     if (className) element.className = className;
     return element;
   }
-  function describe(minutes) {
+  function describe(minutes, setting) {
     if (!Number.isInteger(minutes)) return "Not available";
+    if (setting === "display") return minutes === 0 ? "No idle display timeout" : `Display off after ${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
     return minutes === 0 ? "Never idle sleeps" : `Idle sleep after ${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
   }
-  function selected() {
-    return (status?.profiles || []).filter(profile => target.value === "both" || profile.profile === target.value);
+  function profilesFor(setting) {
+    return (setting === "display" ? status?.displayProfiles : status?.profiles) || [];
   }
-  function hasOverride() { return selected().some(profile => Number.isInteger(profile.originalMinutes)); }
-  function pending() { return (status?.profiles || []).some(profile => profile.phase?.startsWith("pending")); }
-  function canWrite() {
-    const profiles = selected();
-    return hasStatus && status?.helper?.state === "ready" && !writing && !pending() &&
+  function selected(setting) {
+    const sources = target.value === "both" ? ["battery", "adapter"] : [target.value];
+    return sources.map(source => profilesFor(setting).find(profile => profile.profile === source) || { profile: source });
+  }
+  function hasOverride(setting) { return selected(setting).some(profile => Number.isInteger(profile.originalMinutes)); }
+  function requiredByLock(setting, profile) {
+    return status?.idleLock?.hasManagedChanges === true &&
+      (status.idleLock.dependencies || []).some(dependency => dependency.setting === setting && dependency.profile === profile);
+  }
+  function lockRequiresSelected(setting) {
+    return selected(setting).some(profile => requiredByLock(setting, profile.profile));
+  }
+  function pending(setting) { return selected(setting).some(profile => profile.phase?.startsWith("pending")); }
+  function canWrite(setting) {
+    const profiles = selected(setting);
+    return hasStatus && status?.helper?.state === "ready" && !writing && !pending(setting) &&
+      !lockRequiresSelected(setting) &&
       (status?.warnings || []).length === 0 &&
       profiles.length > 0 && profiles.every(profile => Number.isInteger(profile.actualMinutes));
   }
+  function canChangeLock() {
+    const lock = status?.idleLock;
+    return hasStatus && !writing && (lock?.hasManagedChanges ? lock.canRestore : lock?.canEnable);
+  }
+  function renderLock() {
+    const lock = status?.idleLock;
+    const button = document.getElementById("prevent-lock");
+    button.textContent = writingSetting === "lock" ? "Working..." : lock?.hasManagedChanges ? "Restore Lock" : "Prevent idle lock";
+    button.disabled = !token || !canChangeLock();
+    const phases = { off: "Not enabled", active: "Configured", needsRestore: "Restore needed",
+      setupRequired: "Setup / repair needed", unavailable: "Unavailable",
+      uncertain: "Configuration unconfirmed" };
+    document.getElementById("lock-actual").textContent = writingSetting === "lock" ? "Configuration in progress" : hasStatus
+      ? phases[lock?.phase] || "Unavailable"
+      : "Status unconfirmed";
+    const notes = { off: "", active: "", needsRestore: "Use Restore Lock to release saved settings.",
+      setupRequired: "Open Advanced for setup / repair details.", unavailable: "Open Advanced for details.",
+      uncertain: "Lock and required settings are blocked; recovery steps in Advanced." };
+    document.getElementById("lock-note").textContent = notes[lock?.phase] || "";
+    document.getElementById("lock-details").textContent = lock?.message ||
+      "Open the installed Hearth app and inspect its Lock status. No Automation setup is needed.";
+    document.getElementById("lock-saver-values").textContent = `Effective screen-saver idle delay: ${Number.isInteger(lock?.saverDelaySeconds) ? `${lock.saverDelaySeconds} seconds` : "unavailable"}.` +
+      (Number.isInteger(lock?.originalSaverDelaySeconds) ? ` Saved effective screen-saver idle delay: ${lock.originalSaverDelaySeconds} seconds.` : "");
+    document.getElementById("lock-recovery").hidden = lock?.phase !== "uncertain";
+  }
   function renderFeedback() {
-    const messages = [statusError || actionError].filter(Boolean);
-    const details = [actionDetails, statusDetails, ...warnings].filter(Boolean);
+    const messages = [statusError, ...Object.values(actionErrors)].filter(Boolean);
+    const details = [...Object.values(actionDetails), statusDetails, ...warnings].filter(Boolean);
     if (hasStatus && status?.helper?.state !== "ready") {
       if (!messages.length) messages.push("Hearth needs setup or repair. Open Advanced for instructions.");
       details.push(status?.helper?.message || "Helper unavailable.");
@@ -177,34 +264,34 @@ footer { margin-top: 24px; font-size: 12px; }
     document.getElementById("error-detail").replaceChildren(...Array.from(new Set(details)).map(message => textElement("p", message)));
     document.getElementById("diagnostics").hidden = !details.length;
   }
-  function renderControls() {
-    const profiles = selected();
-    const managed = hasOverride();
+  function renderSetting(setting) {
+    const row = settings[setting];
+    const primary = document.getElementById(row.button);
+    const profiles = selected(setting);
+    const managed = hasOverride(setting);
     const allNever = profiles.length > 0 && profiles.every(profile => profile.actualMinutes === 0);
-    primary.textContent = writing ? "Working..." : managed ? "Restore previous settings" : "Keep awake";
-    primary.disabled = !token || !canWrite() || (allNever && !managed);
-    controls.disabled = !token || !canWrite();
+    const required = lockRequiresSelected(setting);
+    primary.textContent = writingSetting === setting ? "Working..." : required ? "Required by Lock" : managed ? `Restore prior ${setting}` : row.action;
+    primary.disabled = !token || !canWrite(setting) || (allNever && !managed);
+    const summary = profiles.map(profile => `${labels[profile.profile]}: ${!Number.isInteger(profile.actualMinutes) ? "unknown" : profile.actualMinutes === 0 ? "no timeout" : `${profile.actualMinutes} min`}`).join(" · ");
+    document.getElementById(row.actual).textContent = status
+      ? `${hasStatus ? "" : "Last known: "}${summary}`
+      : "Settings have not been read yet.";
+    const note = document.getElementById(`${setting}-note`);
+    note.textContent = required ? "" : pending(setting)
+      ? "Change not confirmed. Refresh in Advanced."
+      : allNever && !managed ? "No prior setting saved. Choose a timeout in Advanced to change this." : "";
+    note.hidden = !note.textContent;
+  }
+  function renderControls() {
+    for (const setting of Object.keys(settings)) renderSetting(setting);
+    renderLock();
+    controls.disabled = !token || !canWrite(timeoutSetting.value);
     target.disabled = writing;
+    timeoutSetting.disabled = writing;
     refreshButton.disabled = !token || writing || refreshing;
-    const state = document.getElementById("state");
-    if (writing) state.textContent = "Changing settings...";
-    else if (!hasStatus) state.textContent = status ? "Status unavailable" : "Checking settings...";
-    else if (pending()) state.textContent = "Change not yet confirmed";
-    else if (status?.helper?.state !== "ready") state.textContent = "Setup needed";
-    else if ((status?.warnings || []).length) state.textContent = "Settings need attention";
-    else if (managed) state.textContent = allNever ? "Keeping awake" : "Keeping some sources awake";
-    else state.textContent = allNever ? "Already set to stay awake" : "Idle sleep settings";
-    state.hidden = !writing && hasStatus && status?.helper?.state === "ready" && !pending() &&
-      !(status?.warnings || []).length && !managed && !allNever;
-    const summary = profiles.map(profile => `${labels[profile.profile]}: ${!Number.isInteger(profile.actualMinutes) ? "unknown" : profile.actualMinutes === 0 ? "never" : `${profile.actualMinutes} min`}`).join(" · ");
-    document.getElementById("actual").textContent = summary ? `${hasStatus ? "" : "Last known: "}${summary}.` : "Settings have not been read yet.";
-    document.getElementById("action-note").textContent = pending()
-      ? "An operation is still unconfirmed. Refresh status before making another change."
-      : managed
-        ? "Restores only Hearth's changes."
-        : allNever
-          ? "No saved setting to restore. Choose an explicit timeout in Advanced if desired."
-          : `For ${labels[target.value].toLowerCase()}.`;
+    document.getElementById("action-note").textContent = `For ${labels[target.value].toLowerCase()}.`;
+    document.getElementById("minutes").setAttribute("aria-label", `${settings[timeoutSetting.value].label} sleep timeout in minutes`);
     renderFeedback();
   }
   function renderStatus(value) {
@@ -213,14 +300,23 @@ footer { margin-top: 24px; font-size: 12px; }
     for (const warning of value.warnings || []) warnings.add(warning);
     const details = document.getElementById("profiles");
     details.replaceChildren();
-    for (const profile of value.profiles) {
-      const row = textElement("div", "", "profile");
-      row.append(textElement("p", `${labels[profile.profile]}: ${describe(profile.actualMinutes)}`));
-      row.append(textElement("p", Number.isInteger(profile.originalMinutes)
-        ? `Saved previous setting: ${describe(profile.originalMinutes)}.`
-        : "No saved restore value.", "detail"));
-      if (profile.phase) row.append(textElement("p", `State: ${profile.phase}`, "detail"));
-      details.append(row);
+    for (const [setting, label] of Object.entries(settings)) {
+      for (const profile of profilesFor(setting)) {
+        const row = textElement("div", "", "profile");
+        row.append(textElement("p", `${label.label} — ${labels[profile.profile]}: ${describe(profile.actualMinutes, setting)}`));
+        row.append(textElement("p", Number.isInteger(profile.originalMinutes)
+          ? `Saved previous setting: ${describe(profile.originalMinutes, setting)}.`
+          : "No saved restore value.", "detail"));
+        if (requiredByLock(setting, profile.profile)) {
+          const dependency = status.idleLock.dependencies.find(item => item.setting === setting && item.profile === profile.profile);
+          const ownership = dependency.acquired ? "acquired by Lock" : "borrowed; pre-existing override retained";
+          const instruction = status.idleLock.phase === "uncertain"
+            ? "Changes blocked; recovery review required." : "Use Restore Lock.";
+          row.append(textElement("p", `Required by Lock · ${ownership}. ${instruction}`, "detail"));
+        }
+        if (profile.phase?.startsWith("pending")) row.append(textElement("p", "Change not confirmed.", "detail"));
+        details.append(row);
+      }
     }
     document.getElementById("source").textContent = `Current source: ${value.currentSource || "Unknown"}`;
     const helperLabels = { ready: "Helper ready", setupRequired: "Helper setup required",
@@ -239,7 +335,10 @@ footer { margin-top: 24px; font-size: 12px; }
       token = "";
       try { sessionStorage.removeItem(storageKey); } catch (_) {}
     }
-    if (!response.ok && !payload.outcomes) throw new Error(payload.error || `Request failed (${response.status}).`);
+    if (!response.ok && !payload.outcomes &&
+        !(typeof payload.succeeded === "boolean" && payload.status)) {
+      throw new Error(payload.error || `Request failed (${response.status}).`);
+    }
     return payload;
   }
   async function refresh() {
@@ -273,16 +372,16 @@ footer { margin-top: 24px; font-size: 12px; }
       renderControls();
     }
   }
-  async function perform(action) {
-    if (!token || !canWrite()) return;
-    const request = { action, target: target.value };
+  async function perform(action, setting) {
+    if (!token || !canWrite(setting)) return;
+    const request = { action, target: target.value, setting };
     if (action === "sleep") {
       const input = document.getElementById("minutes");
       const value = input.value.trim();
       if (!/^[0-9]+$/.test(value) || !Number.isSafeInteger(Number(value)) ||
           Number(value) < 1 || Number(value) > 2147483647) {
-        actionError = "Enter a positive whole number of minutes.";
-        actionDetails = "Timeouts must be an integer from 1 to 2147483647.";
+        actionErrors[setting] = `${settings[setting].label}: enter a positive whole number of minutes.`;
+        actionDetails[setting] = "Timeouts must be an integer from 1 to 2147483647.";
         renderFeedback();
         input.focus();
         return;
@@ -290,11 +389,12 @@ footer { margin-top: 24px; font-size: 12px; }
       request.minutes = Number(value);
     }
     writing = true;
+    writingSetting = setting;
     generation += 1;
     refreshController?.abort();
     outcomes.replaceChildren();
     outcomes.hidden = true;
-    activity.textContent = `Applying to ${labels[request.target].toLowerCase()}...`;
+    activity.textContent = `Changing ${setting} for ${labels[request.target].toLowerCase()}...`;
     renderControls();
     try {
       const result = await api("/api/power", {
@@ -303,46 +403,91 @@ footer { margin-top: 24px; font-size: 12px; }
       statusError = "";
       statusDetails = "";
       if (result.succeeded) {
-        actionError = "";
-        actionDetails = "";
+        delete actionErrors[setting];
+        delete actionDetails[setting];
         warnings.clear();
       } else {
         const incomplete = result.outcomes.filter(outcome => outcome.kind === "failed" || outcome.kind === "preserved");
         const failures = incomplete
-          .map(outcome => `${labels[outcome.profile]}: ${outcome.message}`).join(" ");
+          .map(outcome => `${settings[setting].label} — ${labels[outcome.profile]}: ${outcome.message}`).join(" ");
         const affected = incomplete.map(outcome => labels[outcome.profile]).join(" and ");
-        actionError = `${affected || "The"} change was not fully completed. Check details before retrying.`;
-        actionDetails = failures;
+        actionErrors[setting] = `${settings[setting].label}: ${affected || "the"} change was not fully completed. Check details before retrying.`;
+        actionDetails[setting] = failures;
       }
       renderStatus(result.status);
-      for (const outcome of result.outcomes) outcomes.append(textElement("li", `${labels[outcome.profile]}: ${outcome.message}`));
+      for (const outcome of result.outcomes) outcomes.append(textElement("li", `${settings[setting].label} — ${labels[outcome.profile]}: ${outcome.message}`));
       outcomes.hidden = !outcomes.childElementCount;
       lastAction = result.succeeded
-        ? action === "restore" ? "Previous settings restored." : action === "sleep" ? "Sleep timeout saved." : "Keep-awake settings applied."
+        ? action === "restore" ? `${settings[setting].label}: prior settings restored.` : action === "sleep" ? `${settings[setting].label}: timeout saved.` : `${settings[setting].label}: ${setting === "system" ? "keep-awake" : "keep-display-on"} settings applied.`
         : "";
       activity.textContent = lastAction;
     } catch (failure) {
       hasStatus = false;
-      actionError = "The change could not be confirmed. Refresh in Advanced before trying again.";
-      actionDetails = failure.message;
+      actionErrors[setting] = `${settings[setting].label}: the change could not be confirmed. Refresh in Advanced before trying again.`;
+      actionDetails[setting] = failure.message;
       lastAction = "";
       activity.textContent = "";
     } finally {
       writing = false;
+      writingSetting = null;
       renderControls();
     }
+    await refresh();
   }
-  primary.addEventListener("click", () => perform(hasOverride() ? "restore" : "on"));
-  document.getElementById("set-timeout").addEventListener("click", () => perform("sleep"));
+  async function performLock() {
+    if (!token || !canChangeLock()) return;
+    const action = status.idleLock.hasManagedChanges ? "restore" : "on";
+    writing = true;
+    writingSetting = "lock";
+    generation += 1;
+    refreshController?.abort();
+    activity.textContent = action === "on" ? "Configuring Lock for the current user..." : "Restoring Lock-owned settings...";
+    renderControls();
+    try {
+      const result = await api("/api/lock", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action })
+      });
+      status = { ...status, idleLock: result.status };
+      hasStatus = false;
+      if (result.succeeded) {
+        delete actionErrors.lock;
+        delete actionDetails.lock;
+        lastAction = action === "restore"
+          ? "Lock settings restored. macOS adoption may follow later."
+          : "Lock configured. macOS adoption may follow later.";
+      } else {
+        actionErrors.lock = "Lock: not fully completed. Configuration is not confirmed.";
+        actionDetails.lock = result.message;
+        lastAction = "";
+      }
+      activity.textContent = lastAction;
+    } catch (failure) {
+      hasStatus = false;
+      actionErrors.lock = "Lock: the change could not be confirmed. Refresh before continuing.";
+      actionDetails.lock = failure.message;
+      lastAction = "";
+      activity.textContent = "";
+    } finally {
+      writing = false;
+      writingSetting = null;
+      renderControls();
+    }
+    await refresh();
+  }
+  for (const [setting, row] of Object.entries(settings)) {
+    document.getElementById(row.button).addEventListener("click", () => perform(hasOverride(setting) ? "restore" : "on", setting));
+  }
+  document.getElementById("set-timeout").addEventListener("click", () => perform("sleep", timeoutSetting.value));
+  document.getElementById("prevent-lock").addEventListener("click", performLock);
   target.addEventListener("change", renderControls);
+  timeoutSetting.addEventListener("change", renderControls);
   refreshButton.addEventListener("click", refresh);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
   setInterval(() => { if (!document.hidden && !writing) refresh(); }, 10000);
   renderControls();
   if (token) refresh();
   else {
-    document.getElementById("state").textContent = "Open your private link";
-    actionError = "Reopen the URL printed by hearth web. Keep that link private.";
+    statusError = "Reopen the URL printed by hearth web. Keep that link private.";
     activity.textContent = "Not connected.";
     renderFeedback();
   }

@@ -8,6 +8,7 @@ public struct PMSetParser: Sendable {
         var profile: PowerProfile?
         var seen: Set<PowerProfile> = []
         var values: [PowerProfile: Int] = [:]
+        var displayValues: [PowerProfile: Int] = [:]
         for line in custom.split(separator: "\n") {
             let text = line.trimmingCharacters(in: .whitespaces)
             if text.hasSuffix(":") {
@@ -22,14 +23,20 @@ public struct PMSetParser: Sendable {
                 continue
             }
             let fields = text.split(whereSeparator: \.isWhitespace)
-            guard let profile, fields.first == "sleep" else { continue }
+            guard let profile,
+                  let key = fields.first,
+                  let setting = PowerSetting.allCases.first(where: { $0.pmsetKey == key }) else { continue }
+            let previous = setting == .system ? values[profile] : displayValues[profile]
             guard fields.count >= 2,
                   let value = Int(fields[1]),
                   (0...Int(Int32.max)).contains(value),
-                  values[profile] == nil else {
-                throw HearthError.command("pmset returned an invalid or duplicate sleep value for \(profile.label).")
+                  previous == nil else {
+                throw HearthError.command("pmset returned an invalid or duplicate \(setting.pmsetKey) value for \(profile.label).")
             }
-            values[profile] = value
+            switch setting {
+            case .system: values[profile] = value
+            case .display: displayValues[profile] = value
+            }
         }
         guard !values.isEmpty, seen.allSatisfy({ values[$0] != nil }) else {
             throw HearthError.command("Cannot read exact battery/adapter sleep values from pmset -g custom.")
@@ -45,7 +52,7 @@ public struct PMSetParser: Sendable {
         } else {
             source = "Unknown"
         }
-        return PowerSettings(values: values, currentSource: source)
+        return PowerSettings(values: values, currentSource: source, displayValues: displayValues)
     }
 }
 
@@ -115,7 +122,11 @@ public struct SystemPowerRunner: PowerCommandRunning {
             guard let expected = change.expectedMinutes else {
                 throw HearthError.invalidInput("A power change must include the observed previous setting.")
             }
-            return IdleSleepChange(profile: change.profile.rawValue, minutes: change.minutes, expectedMinutes: expected)
+            guard let profile = HelperPowerProfile(rawValue: change.profile.rawValue),
+                  let setting = HelperPowerSetting(rawValue: change.setting.rawValue) else {
+                throw HearthError.invalidInput("Unsupported power setting or profile.")
+            }
+            return IdleSleepChange(profile: profile, minutes: change.minutes, expectedMinutes: expected, setting: setting)
         }
         let lease = FileHandle(fileDescriptor: descriptor, closeOnDealloc: false)
         let outcomes: [HelperCommandOutcome]
@@ -123,16 +134,17 @@ public struct SystemPowerRunner: PowerCommandRunning {
             outcomes = try HelperClient().apply(requests, lease: lease)
         } catch HelperClientError.rejected(let message) {
             outcomes = requests.map {
-                HelperCommandOutcome(profile: $0.profile, exitCode: nil, message: message, didExecute: false)
+                HelperCommandOutcome(profile: $0.profile, exitCode: nil, message: message, didExecute: false, setting: $0.setting)
             }
         } catch {
             throw HearthError.indeterminateHelper("Hearth could not confirm the helper's response: \(error.localizedDescription). Pending restore state is retained because the helper may still be working. Run 'hearth status' after it completes; do not retry the change blindly.")
         }
         return try outcomes.map { outcome in
-            guard let profile = PowerProfile(rawValue: outcome.profile) else {
-                throw HearthError.helperUnavailable("Hearth helper returned an unknown profile. Explicit setup/repair is required.")
+            guard let profile = PowerProfile(rawValue: outcome.profile.rawValue),
+                  let setting = PowerSetting(rawValue: outcome.setting.rawValue) else {
+                throw HearthError.indeterminateHelper("Hearth helper returned an unknown setting or profile. Pending restore state is retained; explicit update/repair is required.")
             }
-            return CommandOutcome(profile: profile, exitCode: outcome.exitCode, message: outcome.message, didExecute: outcome.didExecute)
+            return CommandOutcome(profile: profile, exitCode: outcome.exitCode, message: outcome.message, didExecute: outcome.didExecute, setting: setting)
         }
     }
 }

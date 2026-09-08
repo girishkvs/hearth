@@ -5,30 +5,34 @@ import HearthCore
 @MainActor
 final class HearthPanel {
     let window: NSPanel
+    let setting = NSPopUpButton()
     let target = NSPopUpButton()
-    let prevent = NSButton(title: "Prevent idle sleep", target: nil, action: nil)
+    let prevent = NSButton(title: "Keep system awake", target: nil, action: nil)
     let restore = NSButton(title: "Restore previous settings", target: nil, action: nil)
     let minutes = NSTextField()
     let setTimeout = NSButton(title: "Set sleep timeout", target: nil, action: nil)
     let refresh = NSButton(title: "Refresh", target: nil, action: nil)
     let setup = NSButton(title: "Setup / repair instructions…", target: nil, action: nil)
+    let lockAction = NSButton(title: "Prevent idle lock", target: nil, action: nil)
+    let lockStatus = NSTextField(wrappingLabelWithString: "Lock · Reading status…")
+    let lockScope = NSTextField(wrappingLabelWithString: "Current user · all sources · keeps System/Display awake. macOS may adopt or restore the timer later.")
     let currentSource = NSTextField(labelWithString: "Reading power settings…")
     let helperStatus = NSTextField(wrappingLabelWithString: "Helper: Not yet checked")
     let activity = NSTextField(wrappingLabelWithString: "Reading power settings…")
     let details = NSTextView()
-    let displayNote = NSTextField(labelWithString: "Display may still turn off.")
+    let displayNote = NSTextField(wrappingLabelWithString: "Display sleep control does not prevent automatic locking.")
     private(set) var actualLabels: [PowerProfile: NSTextField] = [:]
     private(set) var ownershipLabels: [PowerProfile: NSTextField] = [:]
 
     init() {
         window = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 570, height: 800),
+            contentRect: NSRect(x: 0, y: 0, width: 570, height: 870),
             styleMask: [.titled, .closable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "Hearth Advanced"
-        window.minSize = NSSize(width: 530, height: 780)
+        window.minSize = NSSize(width: 530, height: 850)
         window.isReleasedWhenClosed = false
         window.hidesOnDeactivate = false
         window.center()
@@ -51,6 +55,21 @@ final class HearthPanel {
         let title = NSTextField(labelWithString: "Idle sleep settings")
         title.font = .systemFont(ofSize: 20, weight: .semibold)
         stack.addArrangedSubview(title)
+        lockAction.bezelStyle = .rounded
+        lockStatus.font = .systemFont(ofSize: 13, weight: .semibold)
+        let lockRow = NSStackView(views: [lockStatus, lockAction])
+        lockRow.spacing = 12
+        stack.addArrangedSubview(lockRow)
+        lockScope.font = .systemFont(ofSize: 12)
+        lockScope.textColor = .secondaryLabelColor
+        add(lockScope, to: stack)
+        add(separator(), to: stack)
+        setting.addItems(withTitles: PowerSetting.allCases.map(\.label))
+        setting.setAccessibilityLabel("Sleep setting")
+        setting.toolTip = "Actions below affect only the selected System or Display setting."
+        let settingRow = NSStackView(views: [NSTextField(labelWithString: "Setting:"), setting])
+        settingRow.spacing = 10
+        stack.addArrangedSubview(settingRow)
         currentSource.textColor = .secondaryLabelColor
         add(currentSource, to: stack)
         stack.setCustomSpacing(20, after: currentSource)
@@ -76,7 +95,7 @@ final class HearthPanel {
         add(helperStatus, to: stack)
         target.addItems(withTitles: ["Both", "Battery", "Power adapter"])
         target.setAccessibilityLabel("Power target")
-        target.toolTip = "Choose which power profiles the action affects."
+        target.toolTip = "Choose which power sources the selected setting affects."
         let targetRow = NSStackView(views: [NSTextField(labelWithString: "Power target:"), target])
         targetRow.spacing = 10
         stack.addArrangedSubview(targetRow)
@@ -100,8 +119,10 @@ final class HearthPanel {
         timeoutNote.font = .systemFont(ofSize: 12)
         timeoutNote.textColor = .secondaryLabelColor
         add(timeoutNote, to: stack)
+        displayNote.font = .systemFont(ofSize: 12)
+        displayNote.textColor = .secondaryLabelColor
         add(displayNote, to: stack)
-        let limits = NSTextField(wrappingLabelWithString: "Lid closure, manual sleep, and system safety behavior are unchanged. Closing this window does not restore settings.")
+        let limits = NSTextField(wrappingLabelWithString: "Manual lock, authentication, lid closure and system safety behavior stay unchanged. Closing this window does not restore settings.")
         limits.font = .systemFont(ofSize: 12)
         limits.textColor = .secondaryLabelColor
         add(limits, to: stack)

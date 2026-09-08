@@ -6,6 +6,7 @@ import XCTest
 final class FakeRunner: PowerCommandRunning, @unchecked Sendable {
     private let lock = NSLock()
     private var values: [PowerProfile: Int]
+    private var displayValues: [PowerProfile: Int]
     private var calls: [[PowerChange]] = []
     private var failures: Set<PowerProfile> = []
     private var skipped: Set<PowerProfile> = []
@@ -14,15 +15,20 @@ final class FakeRunner: PowerCommandRunning, @unchecked Sendable {
     private var unconfirmed = false
     private var availability = HelperAvailability.ready
     var beforeApply: (@Sendable () throws -> Void)?
+    var beforeRead: (@Sendable () throws -> Void)?
 
-    init(_ values: [PowerProfile: Int] = [.battery: 1, .adapter: 0]) { self.values = values }
+    init(_ values: [PowerProfile: Int] = [.battery: 1, .adapter: 0], displayValues: [PowerProfile: Int] = [.battery: 2, .adapter: 10]) {
+        self.values = values
+        self.displayValues = displayValues
+    }
 
     func helperAvailability() -> HelperAvailability { lock.withLock { availability } }
 
     func readSettings() throws -> PowerSettings {
-        try lock.withLock {
+        try beforeRead?()
+        return try lock.withLock {
             if failReadAfterApply && didApply { throw HearthError.command("Read-back failed") }
-            return PowerSettings(values: values, currentSource: "Battery")
+            return PowerSettings(values: values, currentSource: "Battery", displayValues: displayValues)
         }
     }
 
@@ -33,22 +39,29 @@ final class FakeRunner: PowerCommandRunning, @unchecked Sendable {
             didApply = true
             return changes.map { change in
                 if skipped.contains(change.profile) {
-                    return CommandOutcome(profile: change.profile, exitCode: 75, message: "Observed value changed externally.", didExecute: false)
+                    return CommandOutcome(profile: change.profile, exitCode: 75, message: "Observed value changed externally.", didExecute: false, setting: change.setting)
                 }
-                if !failures.contains(change.profile) { values[change.profile] = change.minutes }
+                if !failures.contains(change.profile) {
+                    switch change.setting {
+                    case .system: values[change.profile] = change.minutes
+                    case .display: displayValues[change.profile] = change.minutes
+                    }
+                }
                 return CommandOutcome(
                     profile: change.profile,
                     exitCode: unconfirmed ? nil : (failures.contains(change.profile) ? 1 : 0),
-                    message: failures.contains(change.profile) ? "Helper command failed" : ""
+                    message: failures.contains(change.profile) ? "Helper command failed" : "",
+                    setting: change.setting
                 )
             }
         }
     }
 
     func set(_ profile: PowerProfile, _ value: Int?) { lock.withLock { values[profile] = value } }
+    func setDisplay(_ profile: PowerProfile, _ value: Int?) { lock.withLock { displayValues[profile] = value } }
     func fail(_ profiles: Set<PowerProfile>) { lock.withLock { failures = profiles } }
     func skip(_ profiles: Set<PowerProfile>) { lock.withLock { skipped = profiles } }
-    func failReadback() { lock.withLock { failReadAfterApply = true } }
+    func failReadback() { lock.withLock { failReadAfterApply = true; didApply = false } }
     func recoverReads() { lock.withLock { failReadAfterApply = false } }
     func omitConfirmation() { lock.withLock { unconfirmed = true } }
     func batches() -> [[PowerChange]] { lock.withLock { calls } }
@@ -393,7 +406,7 @@ final class HearthCoreTests: XCTestCase {
     }
 
     func testStateVersionAndValuesAreValidated() throws {
-        XCTAssertThrowsError(try SavedState(version: 2).validate())
+        XCTAssertThrowsError(try SavedState(version: 5).validate())
         XCTAssertThrowsError(try SavedState(profiles: [
             "battery": ProfileState(override: OverrideState(original: -1, applied: 0)),
         ]).validate())
@@ -435,8 +448,7 @@ final class HearthCoreTests: XCTestCase {
         XCTAssertThrowsError(try PowerRequest(action: .sleep))
         XCTAssertThrowsError(try PowerRequest(action: .on, minutes: 10))
         XCTAssertThrowsError(try PowerChange(profile: .battery, minutes: -1))
-        let decoded = try JSONDecoder().decode(PowerRequest.self, from: Data(#"{"action":"sleep","target":"both","minutes":0}"#.utf8))
-        XCTAssertThrowsError(try service.perform(decoded))
+        XCTAssertThrowsError(try JSONDecoder().decode(PowerRequest.self, from: Data(#"{"action":"sleep","target":"both","minutes":0}"#.utf8)))
         XCTAssertTrue(runner.batches().isEmpty)
     }
 
@@ -467,6 +479,7 @@ final class PowerParserTests: XCTestCase {
         """
         let settings = try PMSetParser().parse(custom: input, battery: "Now drawing from 'Battery Power'\n")
         XCTAssertEqual(settings.values, [.battery: 1, .adapter: 0])
+        XCTAssertEqual(settings.displayValues, [.battery: 2, .adapter: 10])
         XCTAssertEqual(settings.currentSource, "Battery")
     }
 
@@ -482,6 +495,10 @@ final class PowerParserTests: XCTestCase {
             "Battery Power:\n sleep -1", "AC Power:\n sleep 1\n sleep 2",
             "Battery Power:\n sleep 1\nAC Power:\n displaysleep 1",
             "AC Power:\n sleep 1\nAC Power:\n sleep 2",
+            "AC Power:\n sleep 1\n displaysleep nope",
+            "AC Power:\n sleep 1\n displaysleep -1",
+            "AC Power:\n sleep 1\n displaysleep 2\n displaysleep 3",
+            "AC Power:\n sleep 1\n displaysleep 2147483648",
         ] {
             XCTAssertThrowsError(try PMSetParser().parse(custom: input, battery: ""), input)
         }

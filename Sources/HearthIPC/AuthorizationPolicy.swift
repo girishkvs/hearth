@@ -33,8 +33,8 @@ public struct HelperAuthorizationPolicy: Sendable {
             throw HelperClientError.incompatible("Invalid Hearth authorization policy fields. Run explicit setup/repair.")
         }
         let validator = PolicyValueValidator()
-        try validator.version(fields["FormatVersion"])
-        try validator.version(fields["ProtocolVersion"])
+        try validator.version(fields["FormatVersion"], expected: 1)
+        try validator.version(fields["ProtocolVersion"], expected: HelperWireCodec.version)
         appCodeHash = try validator.hash(fields["AppCodeHash"])
         cliCodeHash = try validator.hash(fields["CLICodeHash"])
         helperCodeHash = try validator.hash(fields["HelperCodeHash"])
@@ -53,12 +53,12 @@ public struct HelperAuthorizationPolicy: Sendable {
 }
 
 private struct PolicyValueValidator {
-    func version(_ value: Any?) throws {
+    func version(_ value: Any?, expected: Int) throws {
         guard let number = value as? NSNumber,
               CFGetTypeID(number) != CFBooleanGetTypeID(),
               !["f", "d"].contains(String(cString: number.objCType)),
-              number.int64Value == 1 else {
-            throw HelperClientError.incompatible("Unsupported Hearth policy/protocol version. Run explicit setup/repair.")
+              number.int64Value == expected else {
+            throw HelperClientError.incompatible(HelperWireCodec.updateRequiredMessage)
         }
     }
 

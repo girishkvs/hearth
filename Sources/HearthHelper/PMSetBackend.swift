@@ -4,14 +4,24 @@ import HearthCore
 import HearthIPC
 
 struct PMSetBackend: IdleSleepBackend {
-    func readMinutes(profile: String, lease: FileHandle, maintenance: FileHandle) throws -> Int {
-        let result = try FixedPMSetProcess().run(["-g", "custom"], lease: lease, maintenance: maintenance)
+    private let process: any PMSetProcessRunning
+
+    init(process: any PMSetProcessRunning = FixedPMSetProcess()) {
+        self.process = process
+    }
+
+    func readMinutes(
+        profile: HelperPowerProfile, setting: HelperPowerSetting, lease: FileHandle, maintenance: FileHandle
+    ) throws -> Int {
+        let result = try process.run(.read, lease: lease, maintenance: maintenance)
         guard result.exitCode == 0 else {
             throw HelperClientError.unavailable("Cannot read current pmset values: \(result.output)")
         }
         let settings = try PMSetParser().parse(custom: result.output, battery: "")
-        guard let profile = PowerProfile(rawValue: profile), let minutes = settings.values[profile] else {
-            throw HelperClientError.unavailable("Requested power profile is unavailable.")
+        guard let coreProfile = PowerProfile(rawValue: profile.rawValue),
+              let coreSetting = PowerSetting(rawValue: setting.rawValue),
+              let minutes = settings.values(for: coreSetting)[coreProfile] else {
+            throw HelperClientError.unavailable("Requested \(setting.rawValue) timeout for \(profile.rawValue) is unavailable.")
         }
         return minutes
     }
@@ -19,23 +29,47 @@ struct PMSetBackend: IdleSleepBackend {
     func write(_ change: IdleSleepChange, lease: FileHandle, maintenance: FileHandle) -> HelperCommandOutcome {
         do {
             try HelperWireCodec().validate([change])
-            let flag = change.profile == "battery" ? "-b" : "-c"
-            let result = try FixedPMSetProcess().run([flag, "sleep", String(change.minutes)], lease: lease, maintenance: maintenance)
-            return HelperCommandOutcome(profile: change.profile, exitCode: result.exitCode, message: result.output, didExecute: true)
+            let result = try process.run(.write(change), lease: lease, maintenance: maintenance)
+            return HelperCommandOutcome(
+                profile: change.profile, exitCode: result.exitCode, message: result.output,
+                didExecute: true, setting: change.setting
+            )
         } catch let error as LaunchedPMSetFailure {
-            return HelperCommandOutcome(profile: change.profile, exitCode: 1, message: error.localizedDescription, didExecute: true)
+            return HelperCommandOutcome(
+                profile: change.profile, exitCode: 1, message: error.localizedDescription,
+                didExecute: true, setting: change.setting
+            )
         } catch {
-            return HelperCommandOutcome(profile: change.profile, exitCode: 1, message: error.localizedDescription, didExecute: false)
+            return HelperCommandOutcome(
+                profile: change.profile, exitCode: 1, message: error.localizedDescription,
+                didExecute: false, setting: change.setting
+            )
         }
     }
 }
 
-private struct LaunchedPMSetFailure: Error, LocalizedError {
+enum PMSetCommand: Equatable, Sendable {
+    case read
+    case write(IdleSleepChange)
+
+    var arguments: [String] {
+        switch self {
+        case .read: ["-g", "custom"]
+        case .write(let change): [change.profile.flag, change.setting.pmsetKey, String(change.minutes)]
+        }
+    }
+}
+
+protocol PMSetProcessRunning: Sendable {
+    func run(_ command: PMSetCommand, lease: FileHandle, maintenance: FileHandle) throws -> PMSetResult
+}
+
+struct LaunchedPMSetFailure: Error, LocalizedError {
     let message: String
     var errorDescription: String? { message }
 }
 
-private struct PMSetResult {
+struct PMSetResult: Sendable {
     let exitCode: Int32
     let output: String
 }
@@ -61,7 +95,7 @@ private final class BoundedOutput: @unchecked Sendable {
     }
 }
 
-private struct FixedPMSetProcess {
+struct FixedPMSetProcess: PMSetProcessRunning {
     private func spawn(_ arguments: [String], lease: FileHandle, maintenance: FileHandle, output: FileHandle) throws -> pid_t {
         let actions = try InheritedLockActions(
             journal: lease.fileDescriptor, maintenance: maintenance.fileDescriptor,
@@ -84,11 +118,11 @@ private struct FixedPMSetProcess {
         return pid
     }
 
-    func run(_ arguments: [String], lease: FileHandle, maintenance: FileHandle) throws -> PMSetResult {
+    func run(_ command: PMSetCommand, lease: FileHandle, maintenance: FileHandle) throws -> PMSetResult {
         let pipe = Pipe()
         // Destroy the spawn configuration (and its parent-only writer duplicates)
         // before waiting for EOF. The child retains its own output and lock copies.
-        let pid = try spawn(arguments, lease: lease, maintenance: maintenance, output: pipe.fileHandleForWriting)
+        let pid = try spawn(command.arguments, lease: lease, maintenance: maintenance, output: pipe.fileHandleForWriting)
         try? pipe.fileHandleForWriting.close()
         let output = BoundedOutput()
         let drained = DispatchSemaphore(value: 0)

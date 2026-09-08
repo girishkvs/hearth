@@ -20,15 +20,19 @@ app/CLI/helper CDHashes. An ad-hoc identifier does not prove a publisher.
 Build scripts reject root, unexpected/universal architectures, and existing output artifacts.
 Product version comes from root `VERSION`; package filenames include version and native architecture.
 `--release-bin` performs no SwiftPM invocation. Without it, package scripts build release first.
-All app/CLI/helper signing happens on copied release files, with hardened runtime and an empty
-entitlement dictionary. CLI first, app second, separate helper last. Only then are the actual
+All app/CLI/helper signing happens on copied release files with hardened runtime.
+App, CLI, helper and maintenance binaries have empty entitlements. The app has no
+Automation usage description: the current-user timer backend uses public CFPreferences,
+not Apple Events. CLI first, app second, separate helper last. Only then are the actual
 `codesign --display --verbose=4` `CDHash=` values enrolled. Inventory SHA-256 hashes are separate
 file-integrity checks; they are never used as code identity.
 
-For removal with restoration, the user first restores in the v2 app after it reports the helper
+For removal with restoration, the user first restores Lock and independently owned
+System/Display settings (or uses Restore and quit) in the compatible app after it reports the helper
 ready, waits for success, then explicitly confirms `--restored --open-installer`. An absent or
 incompatible helper requires repair or an explicit keep-settings choice. The wrapper intentionally
-does not execute even a fixed-path CLI, so it cannot accidentally invoke a legacy v1 elevation path.
+does not execute even a fixed-path CLI, so it cannot accidentally invoke an older
+private development build's elevation path.
 
 ## Fixed installed paths
 
@@ -37,7 +41,7 @@ does not execute even a fixed-path CLI, so it cannot accidentally invoke a legac
 | `/Applications/Hearth.app` | Root:wheel app tree; directories/executables 0755, ordinary files 0644 |
 | `/Library/PrivilegedHelperTools/dev.girishkvs.hearth.helper` | Root:wheel 0755 regular file, not a worktree symlink |
 | `/Library/LaunchDaemons/dev.girishkvs.hearth.helper.plist` | Root:wheel 0644; fixed `Program`, no arguments/environment, on-demand MachService |
-| `/Library/Application Support/Hearth/authorization.plist` | Root:wheel 0644; protocol/format 1, build ID, three lowercase 40-hex CDHashes |
+| `/Library/Application Support/Hearth/authorization.plist` | Root:wheel 0644; protocol 2 / format 1, build ID, three lowercase 40-hex CDHashes |
 | `/Library/Application Support/Hearth/install-receipt.plist` | Root:wheel 0644; complete allowlisted payload inventory |
 | `/usr/local/bin/hearth` | Root:wheel symlink to `/Applications/Hearth.app/Contents/MacOS/hearth` |
 
@@ -45,6 +49,25 @@ Protected parents must be root-owned 0755, without ACLs or symlinks. Stock `/App
 root:admin 0775 and `/Library/Application Support` root:admin 0755 are accepted explicitly.
 System ancestor flags and the fixed Apple `/var -> private/var` symlink are allowed.
 The app itself remains root:wheel and non-writable to ordinary users.
+
+New and staged payloads require root IPC protocol 2 and empty entitlements;
+Automation and other extra grants are refused. Explicit maintenance may inspect
+and replace/remove an existing protocol 1 or 2 installation only after the same
+complete inventory, ownership and signature checks. This permits updating the
+published 1.0.0 and prior unpublished candidates. A verified legacy app's exact former
+Automation grant is accepted only for update/removal, never for a new or staged payload.
+The user's existing macOS permission state is not changed.
+The installer never migrates per-user state, requests Automation consent, or changes
+power/saver values. Schema 1/2/3 migration to 4 belongs to the unprivileged core; numeric
+legacy Apple Event ownership remains marked as legacy, and pending intent is not
+converted into a confirmed preference write.
+
+The helper's Lock rendezvous is an intentional exposed-interface extension: bounded
+in-memory same-UID lookup and an exact-app-only anonymous publisher listener.
+It does not execute preferences or Apple Events. Both peers authenticate independently
+on the final native-user connection; endpoint possession is not authority. The Lock
+protocol is version 2, separate from the unchanged root power protocol. No extra
+launchd service or durable endpoint archive is installed.
 
 ## Directory creation and bounded repair
 

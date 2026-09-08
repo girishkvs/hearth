@@ -17,26 +17,59 @@ public struct HelperConnectionStatus: Codable, Equatable, Sendable {
     }
 }
 
+public enum HelperPowerSetting: String, Codable, CaseIterable, Sendable {
+    case system
+    case display
+
+    public var pmsetKey: String {
+        switch self {
+        case .system: "sleep"
+        case .display: "displaysleep"
+        }
+    }
+}
+
+public enum HelperPowerProfile: String, Codable, CaseIterable, Sendable {
+    case battery
+    case adapter
+
+    public var flag: String {
+        switch self {
+        case .battery: "-b"
+        case .adapter: "-c"
+        }
+    }
+}
+
 public struct IdleSleepChange: Codable, Equatable, Sendable {
-    public let profile: String
+    public let profile: HelperPowerProfile
+    public let setting: HelperPowerSetting
     public let minutes: Int
     public let expectedMinutes: Int
 
-    public init(profile: String, minutes: Int, expectedMinutes: Int) {
+    public init(
+        profile: HelperPowerProfile, minutes: Int, expectedMinutes: Int, setting: HelperPowerSetting = .system
+    ) {
         self.profile = profile
+        self.setting = setting
         self.minutes = minutes
         self.expectedMinutes = expectedMinutes
     }
 }
 
 public struct HelperCommandOutcome: Codable, Equatable, Sendable {
-    public let profile: String
+    public let profile: HelperPowerProfile
+    public let setting: HelperPowerSetting
     public let exitCode: Int32?
     public let message: String
     public let didExecute: Bool
 
-    public init(profile: String, exitCode: Int32?, message: String = "", didExecute: Bool = true) {
+    public init(
+        profile: HelperPowerProfile, exitCode: Int32?, message: String = "", didExecute: Bool = true,
+        setting: HelperPowerSetting = .system
+    ) {
         self.profile = profile
+        self.setting = setting
         self.exitCode = exitCode
         self.message = message
         self.didExecute = didExecute

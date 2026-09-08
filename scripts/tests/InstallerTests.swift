@@ -1,3 +1,4 @@
+import CoreFoundation
 import Darwin
 import Foundation
 
@@ -10,6 +11,7 @@ final class FakeHost: Host {
     var badSignature = false
     var universal = false
     var injectedEntitlements = false
+    var entitlementOverrides: [String: CommandResult] = [:]
     var candidateHashOnly = false
     var adminDirectories: Set<String> = []
     var copyObserver: ((String) throws -> Void)?
@@ -58,19 +60,40 @@ final class FakeHost: Host {
         return try super.hasACL(path)
     }
 
-    override func run(_ executable: String, _ arguments: [String]) throws -> CommandResult {
+    override func run(_ executable: String, _ arguments: [String], standardOutputOnly: Bool = false) throws -> CommandResult {
         commands.append((executable, arguments))
         if executable == "/usr/bin/lipo" { return CommandResult(status: 0, output: universal ? "arm64 x86_64\n" : "arm64\n") }
         if executable == "/usr/bin/codesign" {
             if arguments.contains("--verify") { try verificationObserver?() }
             if badSignature && arguments.contains("--verify") { return CommandResult(status: 1, output: "invalid signature") }
-            if injectedEntitlements && arguments.contains("--entitlements") {
-                return CommandResult(status: 0, output: "<key>com.apple.security.get-task-allow</key><true/>")
+            if arguments.contains("--entitlements") {
+                let path = arguments.last!
+                guard arguments.contains("--xml") else {
+                    return CommandResult(status: 0, output: "[Dict] {\n\t[key] com.apple.security.automation.apple-events\n\t[value] [Bool] true\n}\n")
+                }
+                let diagnostic = standardOutputOnly ? "" : "Executable=\(path)\n"
+                if let result = entitlementOverrides[path] {
+                    return CommandResult(status: result.status, output: diagnostic + result.output)
+                }
+                var values: [String: Bool] = [:]
+                if injectedEntitlements {
+                    values["com.apple.security.get-task-allow"] = true
+                } else if path.hasSuffix("/HearthApp") {
+                    let contents = try Data(contentsOf: URL(fileURLWithPath: path))
+                    if contents == Data("fake signed Automation release binary".utf8) {
+                        values["com.apple.security.automation.apple-events"] = true
+                    }
+                }
+                // Empty-entitlement signatures can yield no data rather than <dict/>.
+                if values.isEmpty { return CommandResult(status: 0, output: diagnostic) }
+                let data = try PropertyListSerialization.data(fromPropertyList: values, format: .xml, options: 0)
+                return CommandResult(status: 0, output: diagnostic + String(decoding: data, as: UTF8.self))
             }
             if arguments.contains("--verbose=4") {
                 let path = arguments.last!
                 let identifier = path.hasSuffix("/hearth") ? "dev.girishkvs.hearth.cli" :
-                    path.hasSuffix("/HearthApp") ? "dev.girishkvs.hearth" : "dev.girishkvs.hearth.helper"
+                    path.hasSuffix("/HearthApp") ? "dev.girishkvs.hearth" :
+                    path.hasSuffix("/installer-tool") ? "dev.girishkvs.hearth.installer" : "dev.girishkvs.hearth.helper"
                 let hash = candidateHashOnly ? "CandidateCDHashFull=" + String(repeating: "a", count: 64) :
                     "CDHash=" + String(repeating: "a", count: 40)
                 return CommandResult(status: 0, output: "Identifier=\(identifier)\nCodeDirectory v=20500 flags=0x10002(adhoc,runtime)\n\(hash)\n")
@@ -159,9 +182,11 @@ final class InstallerTests {
         return (validator, host)
     }
 
-    func payload(_ validator: Validator) throws {
+    func payload(_ validator: Validator, protocolVersion: Int = 2, appAutomation: Bool = false) throws {
         for relative in ["/Contents/MacOS/HearthApp", "/Contents/MacOS/hearth"] {
-            try write(Data("fake signed release binary".utf8), validator.path(validator.app + relative), mode: 0o755)
+            let legacyApp = relative.hasSuffix("/HearthApp") && appAutomation
+            let contents = legacyApp ? "fake signed Automation release binary" : "fake signed release binary"
+            try write(Data(contents.utf8), validator.path(validator.app + relative), mode: 0o755)
         }
         try write(Data("sealed web resource".utf8), validator.path(validator.app + "/Contents/Resources/web.html"))
         try write(Data("fake helper".utf8), validator.path(validator.helper), mode: 0o755)
@@ -169,7 +194,7 @@ final class InstallerTests {
         try files.setAttributes([.posixPermissions: 0o644], ofItemAtPath: validator.path(validator.daemon))
         try files.createSymbolicLink(atPath: validator.path(validator.link), withDestinationPath: validator.app + "/Contents/MacOS/hearth")
         let hash = String(repeating: "a", count: 40)
-        try plist(Authorization(FormatVersion: 1, ProtocolVersion: 1, AppCodeHash: hash, CLICodeHash: hash,
+        try plist(Authorization(FormatVersion: 1, ProtocolVersion: protocolVersion, AppCodeHash: hash, CLICodeHash: hash,
                                 HelperCodeHash: hash, BuildIdentifier: "test-build"), validator.path(validator.policy))
         try plist(validator.inventory(build: "test-build", enforceOwnership: false), validator.path(validator.receipt))
     }
@@ -205,6 +230,188 @@ final class InstallerTests {
         try assert(!acquired, "same exclusive maintenance lease is held during \(phase)")
     }
 
+    func entitlementXML(_ values: Any) throws -> String {
+        let data = try PropertyListSerialization.data(fromPropertyList: values, format: .xml, options: 0)
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    func testAutomationEntitlements() throws {
+        let key = "com.apple.security.automation.apple-events"
+        try assert(!files.fileExists(atPath: repository + "/Packaging/AppEntitlements.plist"),
+                   "obsolete app Automation signing input is removed")
+        let emptyEntitlements = try PropertyListSerialization.propertyList(
+            from: Data(contentsOf: URL(fileURLWithPath: repository + "/Packaging/EmptyEntitlements.plist")),
+            format: nil) as? [String: Any]
+        try assert(emptyEntitlements?.isEmpty == true, "CLI and helper signing input remains empty")
+        let info = try PropertyListSerialization.propertyList(
+            from: Data(contentsOf: URL(fileURLWithPath: repository + "/Packaging/Info.plist")),
+            format: nil) as? [String: Any]
+        try assert(info?["NSAppleEventsUsageDescription"] == nil, "current app has no Apple Events usage description")
+
+        let (target, host) = try fixture("app-entitlements")
+        try payload(target)
+        let app = target.path(target.app + "/Contents/MacOS/HearthApp")
+        try target.validateSignatures()
+        try assert(true, "new app, CLI and helper have no entitlements")
+        try assert(target.preflight() != nil, "new empty-entitlement app verifies for installed maintenance")
+        let emptyXML = try entitlementXML([String: Bool]())
+        for output in ["", " \n\t", emptyXML] {
+            host.entitlementOverrides[app] = CommandResult(status: 0, output: output)
+            try target.validateSignatures()
+            try assert(target.preflight() != nil, "fully verified legacy app can have no entitlements during maintenance")
+        }
+        host.badSignature = true
+        try refused("legacy empty app still requires its full signature") { _ = try target.preflight() }
+        host.badSignature = false
+        host.entitlementOverrides.removeAll()
+
+        let invalid: [(String, Any)] = [
+            ("false", [key: false]),
+            ("string", [key: "true"]),
+            ("integer one", [key: 1]),
+            ("real one", [key: 1.0]),
+            ("array value", [key: [true]]),
+            ("additional key", [key: true, "com.apple.security.get-task-allow": true]),
+            ("unrelated grant", ["com.apple.security.cs.disable-library-validation": true]),
+            ("array root", [key])
+        ]
+        for (label, values) in invalid {
+            host.entitlementOverrides[app] = CommandResult(status: 0, output: try entitlementXML(values))
+            try refused("new app rejects \(label) entitlement property list") { try target.validateSignatures() }
+            try refused("installed app rejects \(label) entitlement property list") { _ = try target.preflight() }
+        }
+        for output in ["not a property list", "<plist><dict>", "Executable=\(app)\n", "[Dict] {}"] {
+            host.entitlementOverrides[app] = CommandResult(status: 0, output: output)
+            try refused("malformed/diagnostic/abstract entitlement output is not an empty grant") {
+                _ = try target.preflight()
+            }
+        }
+        host.entitlementOverrides[app] = CommandResult(status: 1, output: "")
+        try refused("failed codesign entitlement extraction is not accepted as empty") { _ = try target.preflight() }
+        host.entitlementOverrides.removeAll()
+        let automationXML = try entitlementXML([key: true])
+        host.entitlementOverrides[app] = CommandResult(status: 0, output: automationXML)
+        try refused("new app cannot carry obsolete Automation grant") { try target.validateSignatures() }
+        try assert(target.preflight() != nil, "verified installed legacy Automation app remains eligible for update/removal")
+        host.entitlementOverrides.removeAll()
+        for relative in [target.app + "/Contents/MacOS/hearth", target.helper] {
+            let path = target.path(relative)
+            host.entitlementOverrides[path] = CommandResult(status: 0, output: emptyXML)
+            try target.validateSignatures()
+            try assert(true, "CLI/helper also accept a valid empty entitlement dictionary: \(relative)")
+            host.entitlementOverrides[path] = CommandResult(status: 0, output: automationXML)
+            try refused("new CLI/helper cannot carry the app Automation grant: \(relative)") { try target.validateSignatures() }
+            try refused("maintenance cannot carry Automation on CLI/helper: \(relative)") { _ = try target.preflight() }
+            host.entitlementOverrides.removeAll()
+        }
+        host.entitlementOverrides[target.path("/installer-tool")] = CommandResult(status: 0, output: automationXML)
+        try refused("embedded maintenance tool cannot carry the app Automation grant") {
+            _ = try target.codeHash("/installer-tool", identifier: "dev.girishkvs.hearth.installer")
+        }
+    }
+
+    func testStagedAutomationEntitlements() throws {
+        let key = "com.apple.security.automation.apple-events"
+        let (source, _) = try fixture("automation-staging-source")
+        try payload(source)
+        let extraction = try extractionFor(source, name: "automation-staging-extraction")
+        let app = source.app + "/Contents/MacOS/HearthApp"
+        let cases = [
+            ("automation-app", app, try entitlementXML([key: true])),
+            ("false-app", app, try entitlementXML([key: false])),
+            ("extra-app", app, try entitlementXML([key: true, "com.apple.security.get-task-allow": true])),
+            ("cli-grant", source.app + "/Contents/MacOS/hearth", try entitlementXML([key: true])),
+            ("helper-grant", source.helper, try entitlementXML([key: true]))
+        ]
+        for (label, relative, output) in cases {
+            let (installed, host) = try fixture("automation-staging-\(label)")
+            try payload(installed, appAutomation: false)
+            let oldReceipt = try Data(contentsOf: URL(fileURLWithPath: installed.path(installed.receipt)))
+            let maintenance = Maintenance(validator: installed, extraction: extraction)
+            try write(Data(), installed.path(maintenance.lock), mode: 0o600)
+            try maintenance.run("setup-preflight")
+            host.ownershipObserver = {
+                let staged = installed.path(maintenance.staging + "/payload" + relative)
+                host.entitlementOverrides[staged] = CommandResult(status: 0, output: output)
+            }
+            try refused("staging rejects obsolete or unexpected grants: \(label)") {
+                try maintenance.run("setup-postflight")
+            }
+            try assert(try Data(contentsOf: URL(fileURLWithPath: installed.path(installed.receipt))) == oldReceipt &&
+                       installed.preflight() != nil,
+                       "invalid staged \(label) leaves the fully verified old installation untouched")
+            try assert(!host.commands.contains { $0.0 == "/bin/launchctl" && $0.1.first == "bootstrap" },
+                       "invalid staged \(label) never activates a new helper")
+        }
+    }
+
+    func testProtocolUpgradePreservesActiveUserState() throws {
+        for (protocolVersion, appAutomation) in [(1, false), (2, false), (2, true)] {
+            let suffix = "\(protocolVersion)-\(appAutomation)"
+            let (installed, host) = try fixture("legacy-installed-\(suffix)")
+            try payload(installed, protocolVersion: protocolVersion, appAutomation: appAutomation)
+            try assert(installed.preflight() != nil,
+                       "verified empty-app protocol \(protocolVersion) installation remains eligible for maintenance")
+            let legacyExtraction = try extractionFor(installed, name: "legacy-protocol-extraction-\(suffix)")
+            let (legacyTarget, legacyHost) = try fixture("legacy-protocol-target-\(suffix)")
+            let legacyMaintenance = Maintenance(validator: legacyTarget, extraction: legacyExtraction)
+            if protocolVersion == 1 || appAutomation {
+                try refused("new package cannot enroll old protocol or Automation app") {
+                    try installed.validateSignatures()
+                }
+                try refused("legacy package source refused before creating maintenance state") {
+                    try legacyMaintenance.run("setup-preflight")
+                }
+            } else {
+                try installed.validateSignatures()
+            }
+            try assert(legacyHost.commands.allSatisfy { ["/usr/bin/lipo", "/usr/bin/codesign"].contains($0.0) } &&
+                       legacyTarget.metadata(legacyMaintenance.marker) == nil &&
+                       legacyTarget.metadata(legacyMaintenance.lock) == nil,
+                       "legacy source refusal never reaches service/copy tools or creates maintenance state")
+
+            let (source, _) = try fixture("automation-upgrade-source-\(suffix)")
+            try payload(source)
+            let extraction = try extractionFor(source, name: "automation-upgrade-extraction-\(suffix)")
+            let maintenance = Maintenance(validator: installed, extraction: extraction)
+            let statePath = installed.path("/Users/test/Library/Application Support/Hearth/state.json")
+            let activeState = Data(#"{"version":1,"profiles":{"battery":{"override":{"original":1,"applied":0}}}}"#.utf8)
+            try write(activeState, statePath, mode: 0o600)
+            try write(Data(), installed.path(maintenance.lock), mode: 0o600)
+            host.registered = true
+            try maintenance.run("setup-preflight")
+            try assert(try Data(contentsOf: URL(fileURLWithPath: statePath)) == activeState,
+                       "protocol \(protocolVersion) update preflight preserves raw active System 0/original 1 state")
+            try maintenance.run("setup-postflight")
+            try installed.validateSignatures()
+            let policy = try PropertyListDecoder().decode(
+                Authorization.self, from: Data(contentsOf: URL(fileURLWithPath: installed.path(installed.policy))))
+            try assert(policy.FormatVersion == 1 && policy.ProtocolVersion == 2,
+                       "explicit update enrolls no-entitlement app with IPC 2 and policy format 1")
+            try assert(try Data(contentsOf: URL(fileURLWithPath: statePath)) == activeState,
+                       "protocol \(protocolVersion) update leaves raw user state untouched for unprivileged migration")
+            try assert(!host.commands.contains { $0.0.contains("pmset") || $0.0.contains("open") },
+                       "legacy upgrade does not run power commands or open Installer")
+
+            let (removal, removalHost) = try fixture("legacy-removal-\(suffix)")
+            try payload(removal, protocolVersion: protocolVersion, appAutomation: appAutomation)
+            let remove = Maintenance(validator: removal, extraction: temporary)
+            try write(Data(), removal.path(remove.lock), mode: 0o600)
+            let removalState = removal.path("/Users/test/Library/Application Support/Hearth/state.json")
+            try write(activeState, removalState, mode: 0o600)
+            removalHost.registered = true
+            try remove.run("remove-preflight")
+            try remove.run("remove-postflight")
+            try assert(removal.metadata(removal.app) == nil && !removalHost.registered &&
+                       Data(contentsOf: URL(fileURLWithPath: removalState)) == activeState,
+                       "verified empty-app protocol \(protocolVersion) removal remains eligible and preserves raw state")
+        }
+
+        let (future, _) = try fixture("future-protocol")
+        try payload(future, protocolVersion: 3)
+        try refused("future installed protocol refused despite matching inventory") { _ = try future.preflight() }
+    }
+
     func run() throws {
         guard getuid() != 0,
               CommandLine.arguments.count >= 2 else { throw InstallFailure.refused("Tests require a normal user and repository path") }
@@ -218,6 +425,9 @@ final class InstallerTests {
         try testCreatedOwnership()
         try testSupportRepair()
         try testScriptOnlyReceipts()
+        try testAutomationEntitlements()
+        try testStagedAutomationEntitlements()
+        try testProtocolUpgradePreservesActiveUserState()
         try write(Data("foreign".utf8), fresh.path(fresh.helper))
         try refused("foreign helper collision") { _ = try fresh.preflight() }
         let (hostile, _) = try fixture("hostile-ancestor")
@@ -594,11 +804,17 @@ final class InstallerTests {
             from: Data(contentsOf: URL(fileURLWithPath: validator.path(validator.app + "/Contents/Info.plist"))),
             format: nil) as? [String: Any]
         try assert(appInfo?["CFBundleShortVersionString"] as? String == version, "packaged app version matches VERSION")
+        let sourceInfo = try PropertyListSerialization.propertyList(
+            from: Data(contentsOf: URL(fileURLWithPath: repository + "/Packaging/Info.plist")),
+            format: nil) as? [String: Any]
+        try assert(appInfo?["NSAppleEventsUsageDescription"] == nil &&
+                   sourceInfo?["NSAppleEventsUsageDescription"] == nil,
+                   "packaged and source app metadata omit obsolete Automation consent text")
         let receipt = try validator.readInventory(Data(contentsOf: URL(fileURLWithPath: validator.path(validator.receipt))))
         let actual = try validator.inventory(build: receipt.buildIdentifier, enforceOwnership: false)
         try assert(receipt.entries == actual.entries, "expanded payload matches exact final inventory")
         try validator.validateSignatures()
-        try assert(true, "final app, CLI, helper signatures and exact 20-byte CDHashes verify")
+        try assert(true, "empty app/CLI/helper grants, signatures and exact 20-byte CDHashes verify")
         try assert(Data(contentsOf: URL(fileURLWithPath: validator.path(validator.app + "/Contents/Resources/LICENSE.txt"))) == projectLicense,
                    "app includes the same project MIT license separately from dependency notices")
         try assert(try validator.metadata(validator.app + "/Contents/Resources/Hearth_HearthWeb.bundle/index.html") != nil,

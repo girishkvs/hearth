@@ -1,7 +1,91 @@
 import Foundation
 
 public struct HelperClient: Sendable {
-    public init() {}
+    private let connectionFactory: @Sendable () throws -> NSXPCConnection
+    private let publisherConnectionFactory: @Sendable (NSXPCListenerEndpoint) throws -> NSXPCConnection
+
+    public init() {
+        connectionFactory = {
+            let policy = try ProtectedHelperInstallation().loadPolicy()
+            let connection = NSXPCConnection(machServiceName: HelperInstallation.serviceName, options: .privileged)
+            connection.remoteObjectInterface = HelperXPCInterface().make()
+            connection.setCodeSigningRequirement(policy.helperRequirement.text)
+            return connection
+        }
+        publisherConnectionFactory = { endpoint in
+            let policy = try ProtectedHelperInstallation().loadPolicy()
+            let connection = NSXPCConnection(listenerEndpoint: endpoint)
+            connection.remoteObjectInterface = LockPublisherXPCInterface().make()
+            connection.setCodeSigningRequirement(policy.helperRequirement.text)
+            return connection
+        }
+    }
+
+    init(
+        connectionFactory: @escaping @Sendable () throws -> NSXPCConnection,
+        publisherConnectionFactory: @escaping @Sendable (NSXPCListenerEndpoint) throws -> NSXPCConnection = { _ in
+            throw HelperClientError.unavailable("No publisher factory configured for this test client.")
+        }
+    ) {
+        self.connectionFactory = connectionFactory
+        self.publisherConnectionFactory = publisherConnectionFactory
+    }
+
+    public func publishLockEndpoint(_ endpoint: NSXPCListenerEndpoint) throws -> HelperLockEndpointPublication {
+        guard let publisher = try brokerEndpoint(publishing: true) else {
+            throw HelperClientError.unavailable("The installed helper has no Lock publisher. Run explicit setup/repair.")
+        }
+        let connection = try publisherConnectionFactory(publisher)
+        let publication = HelperLockEndpointPublication(connection: connection)
+        let waiter = BrokerReply<Bool>()
+        let failure = HelperClientError.unavailable("Lock endpoint publication failed. Open Hearth or run explicit setup/repair.")
+        connection.invalidationHandler = { [weak publication] in
+            publication?.markInvalid()
+            waiter.complete(.failure(failure))
+        }
+        connection.interruptionHandler = { [weak publication] in
+            publication?.invalidate()
+            waiter.complete(.failure(failure))
+        }
+        connection.activate()
+        guard let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in
+            waiter.complete(.failure(failure))
+        }) as? any HearthLockPublisherXPC else {
+            publication.invalidate()
+            throw failure
+        }
+        proxy.publishLockEndpoint(endpoint) { waiter.complete(.success($0)) }
+        do {
+            guard try waiter.wait(failure: failure) else { throw failure }
+            return publication
+        } catch {
+            publication.invalidate()
+            throw error
+        }
+    }
+
+    public func lockEndpoint() throws -> NSXPCListenerEndpoint? {
+        try brokerEndpoint(publishing: false)
+    }
+
+    private func brokerEndpoint(publishing: Bool) throws -> NSXPCListenerEndpoint? {
+        let connection = try connect()
+        defer { connection.invalidate() }
+        let waiter = BrokerReply<NSXPCListenerEndpoint?>()
+        let failure = HelperClientError.unavailable("Hearth Lock rendezvous is unavailable. Open Hearth or run explicit setup/repair.")
+        connection.invalidationHandler = { waiter.complete(.failure(failure)) }
+        connection.interruptionHandler = { waiter.complete(.failure(failure)) }
+        connection.activate()
+        guard let proxy = connection.remoteObjectProxyWithErrorHandler({ _ in
+            waiter.complete(.failure(failure))
+        }) as? any HearthHelperXPC else { throw failure }
+        if publishing {
+            proxy.publisherEndpoint { waiter.complete(.success($0)) }
+        } else {
+            proxy.lockEndpoint { waiter.complete(.success($0)) }
+        }
+        return try waiter.wait(failure: failure)
+    }
 
     public func availability() -> HelperConnectionStatus {
         do {
@@ -66,15 +150,15 @@ public struct HelperClient: Sendable {
     }
 
     private func rejectedOutcomes(_ changes: [IdleSleepChange], message: String) -> [HelperCommandOutcome] {
-        changes.map { HelperCommandOutcome(profile: $0.profile, exitCode: 1, message: message, didExecute: false) }
+        changes.map {
+            HelperCommandOutcome(
+                profile: $0.profile, exitCode: 1, message: message, didExecute: false, setting: $0.setting
+            )
+        }
     }
 
     private func connect() throws -> NSXPCConnection {
-        let policy = try ProtectedHelperInstallation().loadPolicy()
-        let connection = NSXPCConnection(machServiceName: HelperInstallation.serviceName, options: .privileged)
-        connection.remoteObjectInterface = HelperXPCInterface().make()
-        connection.setCodeSigningRequirement(policy.helperRequirement.text)
-        return connection
+        try connectionFactory()
     }
 
     private func call(
@@ -94,6 +178,48 @@ public struct HelperClient: Sendable {
         }) as? any HearthHelperXPC else { throw unavailable }
         send(proxy) { data in result.complete(.success(data)) }
         return try result.wait(seconds: writing ? 35 : 3, failure: unavailable)
+    }
+}
+
+public final class HelperLockEndpointPublication: @unchecked Sendable {
+    private let lock = NSLock()
+    private var connection: NSXPCConnection?
+
+    init(connection: NSXPCConnection) { self.connection = connection }
+
+    public var isValid: Bool { lock.withLock { connection != nil } }
+
+    public func invalidate() {
+        let previous = lock.withLock {
+            let previous = connection
+            connection = nil
+            return previous
+        }
+        previous?.invalidate()
+    }
+
+    fileprivate func markInvalid() { lock.withLock { connection = nil } }
+
+    deinit { connection?.invalidate() }
+}
+
+// Endpoints are Foundation XPC values; the lock owns every result access.
+private final class BrokerReply<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private let semaphore = DispatchSemaphore(value: 0)
+    private var result: Result<Value, HelperClientError>?
+
+    func complete(_ value: Result<Value, HelperClientError>) {
+        lock.withLock {
+            guard result == nil else { return }
+            result = value
+            semaphore.signal()
+        }
+    }
+
+    func wait(failure: HelperClientError) throws -> Value {
+        guard semaphore.wait(timeout: .now() + 3) == .success else { throw failure }
+        return try lock.withLock { try result!.get() }
     }
 }
 

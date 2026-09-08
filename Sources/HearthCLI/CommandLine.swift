@@ -6,6 +6,8 @@ enum CLICommand: Equatable {
     case version
     case setup
     case status(json: Bool)
+    case lockStatus
+    case lock(IdleLockRequest)
     case power(PowerRequest)
     case web(port: Int, openBrowser: Bool)
 }
@@ -29,10 +31,22 @@ struct CommandLineParser {
                 throw invalid("Usage: hearth status [--json]")
             }
             return .status(json: options == ["--json"])
+        case "lock":
+            guard options.count == 1 else {
+                throw invalid("Usage: hearth lock on|restore|status (current user; no power target)")
+            }
+            if options[0] == "status" { return .lockStatus }
+            guard let action = IdleLockAction(rawValue: options[0]) else {
+                throw invalid("Usage: hearth lock on|restore|status")
+            }
+            return .lock(IdleLockRequest(action: action))
         case "on", "restore", "off", "sleep":
-            let parsed = try pairs(options, allowed: ["--power", "--minutes"])
+            let parsed = try pairs(options, allowed: ["--power", "--minutes", "--setting"])
             guard let target = PowerTarget(rawValue: parsed["--power"] ?? "both") else {
                 throw invalid("--power must be battery, adapter, or both.")
+            }
+            guard let setting = PowerSetting(rawValue: parsed["--setting"] ?? "system") else {
+                throw invalid("--setting must be system or display.")
             }
             let action = command == "off" ? PowerAction.restore : PowerAction(rawValue: command)!
             var minutes: Int?
@@ -45,7 +59,7 @@ struct CommandLineParser {
                 }
                 minutes = number
             }
-            return .power(try PowerRequest(action: action, target: target, minutes: minutes))
+            return .power(try PowerRequest(action: action, target: target, minutes: minutes, setting: setting))
         case "web":
             let noOpenCount = options.filter { $0 == "--no-open" }.count
             guard noOpenCount <= 1 else { throw invalid("Duplicate --no-open option.") }
@@ -84,18 +98,61 @@ struct CommandLineParser {
 
 struct StatusPrinter {
     func text(_ status: HearthStatus) -> String {
-        let profiles = status.profiles.map { profile in
-            let saved = profile.originalMinutes.map { "restore \($0) minute(s), \(profile.phase ?? "unknown phase")" }
-                ?? "not managed by Hearth"
-            return "\(profile.profile.label): \(profile.actualDescription); \(saved)."
+        let profiles = PowerSetting.allCases.flatMap { setting in
+            status.profiles(for: setting).map { profile in
+                let saved = profile.originalMinutes.map { "restore \($0) minute(s), \(profile.phase ?? "unknown phase")" }
+                    ?? "not managed by Hearth"
+                let required: String
+                if status.idleLock?.requires(setting, profile: profile.profile) == true {
+                    required = status.idleLock?.phase == .uncertain
+                        ? " Blocked while Lock completion is unconfirmed; see recovery guidance below."
+                        : " Required by Lock; use 'hearth lock restore' first."
+                } else {
+                    required = ""
+                }
+                return "\(setting.label) — \(profile.profile.label): \(profile.actualDescription); \(saved).\(required)"
+            }
         }
         var helperLines = ["Helper: \(helperState(status.helper.state)). \(status.helper.message)"]
         if !status.helper.isReady {
             helperLines.append("Power changes are disabled. Run 'hearth setup' for explicit setup / repair instructions. Status reads remain available.")
         }
-        return (["Current power source: \(status.currentSource)"] + profiles + helperLines + [
-            "Display may still turn off. Settings persist after exit and reboot.",
+        return (["Current power source: \(status.currentSource)"] + profiles + [lockText(status.idleLock)] + helperLines + [
+            "Manual lock, passwords, lid closure, and system safety behavior are unchanged.",
+            "Settings persist after exit and reboot.",
         ]).joined(separator: "\n")
+    }
+
+    func lockText(_ lock: IdleLockStatus?) -> String {
+        guard let lock else {
+            return "Lock: Unavailable. Open the installed Hearth app and inspect its Lock status. No Automation setup is needed."
+        }
+        let phase: String
+        switch lock.phase {
+        case .active: phase = "Configured"
+        case .off: phase = "Not enabled"
+        case .uncertain: phase = "Configuration unconfirmed"
+        case .needsRestore: phase = "Restore needed"
+        case .setupRequired: phase = "Setup / repair needed"
+        case .unavailable: phase = "Unavailable"
+        }
+        var lines = [
+            "Lock: \(phase). Current user · keeps System and Display awake.", lock.message,
+            "Configured settings and readback do not prove immediate macOS timer adoption. macOS may adopt or restore the timer later.",
+        ]
+        if let delay = lock.saverDelaySeconds {
+            lines.append("Effective screen-saver idle delay: \(delay) seconds.")
+        }
+        if let original = lock.originalSaverDelaySeconds {
+            lines.append("Saved effective screen-saver idle delay: \(original) seconds.")
+        }
+        for dependency in lock.dependencies {
+            let ownership = dependency.acquired ? "acquired by Lock" : "borrowed; prior setting retained"
+            lines.append("\(dependency.setting.label) — \(dependency.profile.label): Required by Lock; \(ownership).")
+        }
+        if lock.canRestore { lines.append("Use 'hearth lock restore' to release only Lock-owned changes.") }
+        if let guidance = lock.recoveryGuidance { lines.append(guidance) }
+        return lines.joined(separator: "\n")
     }
 
     private func helperState(_ state: HelperState) -> String {
@@ -126,6 +183,11 @@ struct SetupInstructions {
         2. Review the versioned local setup package under dist/.
         3. Use scripts/install.sh --gui or --cli explicitly to authorize installation.
         4. Run hearth status (or Refresh in the app or web page) and check Helper: Ready.
+
+        Lock uses public current-user preferences; no Automation setup is needed.
+        CLI and web use the verified Hearth app as one serialized current-user
+        writer. Helper installation is separate and supports System/Display power
+        changes. Manual lock and passwords are unchanged.
 
         Normal on, restore, and sleep actions use the installed helper without
         administrator prompts. They never start setup or fall back to elevation.

@@ -34,20 +34,25 @@ let package = Package(
     targets: [
         .target(name: "HearthIPC"),
         .target(name: "HearthCore", dependencies: ["HearthIPC"]),
+        .target(name: "HearthPolicyBridge", linkerSettings: [.linkedFramework("OpenDirectory")]),
+        .target(name: "HearthAutomation", dependencies: ["HearthCore", "HearthIPC", "HearthPolicyBridge"]),
+        .target(name: "HearthLockIPC", dependencies: ["HearthCore", "HearthIPC"]),
         .target(
             name: "HearthWeb",
             dependencies: [
-                "HearthCore",
+                "HearthCore", "HearthLockIPC",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
             ],
             resources: [.copy("Resources/index.html")]
         ),
-        .executableTarget(name: "HearthCLI", dependencies: ["HearthCore", "HearthWeb"]),
-        .executableTarget(name: "HearthApp", dependencies: ["HearthCore"]),
+        .executableTarget(name: "HearthCLI", dependencies: ["HearthCore", "HearthWeb", "HearthLockIPC"]),
+        .executableTarget(name: "HearthApp", dependencies: ["HearthCore", "HearthAutomation", "HearthLockIPC"]),
         .executableTarget(name: "HearthHelper", dependencies: ["HearthCore", "HearthIPC"]),
         .testTarget(name: "HearthCoreTests", dependencies: ["HearthCore"]),
+        .testTarget(name: "HearthAutomationTests", dependencies: ["HearthAutomation", "HearthCore", "HearthPolicyBridge"]),
+        .testTarget(name: "HearthLockIPCTests", dependencies: ["HearthLockIPC", "HearthCore", "HearthIPC"]),
         .testTarget(name: "HearthCLITests", dependencies: ["HearthCLI", "HearthCore"]),
         .testTarget(name: "HearthWebTests", dependencies: ["HearthWeb", "HearthCore"]),
         .testTarget(name: "HearthHelperTests", dependencies: ["HearthHelper", "HearthIPC", "HearthCore"]),

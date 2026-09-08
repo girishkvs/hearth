@@ -284,6 +284,7 @@ enum WebRoute: Sendable {
     case page
     case status
     case power
+    case lock
 }
 
 struct RequestRouter: Sendable {
@@ -327,7 +328,9 @@ struct RequestRouter: Sendable {
             }
             return .success(.page)
         }
-        guard head.uri == "/api/status" || head.uri == "/api/power" else {
+        guard head.uri == "/api/status" ||
+              head.uri == "/api/power" ||
+              head.uri == "/api/lock" else {
             return .failure(RouteFailure(code: 404, message: "Route not found."))
         }
         guard authenticated(head.headers["authorization"]) else {
@@ -340,22 +343,48 @@ struct RequestRouter: Sendable {
             return .success(.status)
         }
         guard head.method == .POST else {
-            return .failure(RouteFailure(code: 405, message: "Use POST for power changes."))
+            return .failure(RouteFailure(code: 405, message: "Use POST for changes."))
         }
         guard origins == ["http://\(authority)"] else {
-            return .failure(RouteFailure(code: 403, message: "Power changes require the matching Origin header."))
+            return .failure(RouteFailure(code: 403, message: "Changes require the matching Origin header."))
         }
         guard head.headers["content-type"].count == 1,
               let contentType = head.headers.first(name: "content-type"),
               contentType.lowercased().split(separator: ";").first?.trimmingCharacters(in: .whitespaces) == "application/json" else {
-            return .failure(RouteFailure(code: 415, message: "Use application/json for power changes."))
+            return .failure(RouteFailure(code: 415, message: "Use application/json for changes."))
         }
-        return .success(.power)
+        return .success(head.uri == "/api/lock" ? .lock : .power)
     }
 
     func decodePower(_ body: Data) throws -> PowerRequest {
         let request = try JSONDecoder().decode(PowerBody.self, from: body)
-        return try PowerRequest(action: request.action, target: request.target, minutes: request.minutes)
+        try rejectDuplicateFields(in: body)
+        return try PowerRequest(action: request.action, target: request.target, minutes: request.minutes, setting: request.setting)
+    }
+
+    func decodeLock(_ body: Data) throws -> IdleLockRequest {
+        let request = try JSONDecoder().decode(LockBody.self, from: body)
+        try rejectDuplicateFields(in: body)
+        return IdleLockRequest(action: request.action)
+    }
+
+    private func rejectDuplicateFields(in body: Data) throws {
+        // JSONDecoder coalesces duplicate keys. Inspect string tokens only after
+        // typed decoding has validated the JSON and its flat scalar field types.
+        guard let json = String(data: body, encoding: .utf8),
+              !body.contains(0) else {
+            throw HearthError.invalidInput("Use UTF-8 JSON.")
+        }
+        let strings = try NSRegularExpression(pattern: #""(?:[^"\\]|\\.)*""#)
+        var names = Set<String>()
+        for match in strings.matches(in: json, range: NSRange(json.startIndex..., in: json)) {
+            guard let range = Range(match.range, in: json),
+                  json[range.upperBound...].drop(while: { $0.isWhitespace }).first == ":" else { continue }
+            let name = try JSONDecoder().decode(String.self, from: Data(json[range].utf8))
+            guard names.insert(name).inserted else {
+                throw HearthError.invalidInput("Duplicate fields are not allowed.")
+            }
+        }
     }
 
     private func authenticated(_ values: [String]) -> Bool {
@@ -374,21 +403,43 @@ struct RouteFailure: Error {
     let message: String
 }
 
+private struct LockBody: Decodable {
+    let action: IdleLockAction
+
+    init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: Field.self)
+        guard Set(container.allKeys.map(\.stringValue)) == ["action"] else {
+            throw HearthError.invalidInput("Provide only action: on or restore. Lock has no power target or setup action.")
+        }
+        action = try container.decode(IdleLockAction.self, forKey: Field("action"))
+    }
+
+    private struct Field: CodingKey {
+        let stringValue: String
+        let intValue: Int? = nil
+        init(_ value: String) { stringValue = value }
+        init?(stringValue: String) { self.init(stringValue) }
+        init?(intValue: Int) { return nil }
+    }
+}
+
 private struct PowerBody: Decodable {
     let action: PowerAction
     let target: PowerTarget
     let minutes: Int?
+    let setting: PowerSetting
 
     init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: Field.self)
         let names = Set(container.allKeys.map(\.stringValue))
-        guard names.isSubset(of: ["action", "target", "minutes"]),
+        guard names.isSubset(of: ["action", "target", "minutes", "setting"]),
               names.contains("action"),
               names.contains("target") else {
-            throw HearthError.invalidInput("Provide action and target, with minutes only for sleep. Unknown fields are not allowed.")
+            throw HearthError.invalidInput("Provide action and target, optional setting, and minutes only for sleep. Unknown fields are not allowed.")
         }
         action = try container.decode(PowerAction.self, forKey: Field("action"))
         target = try container.decode(PowerTarget.self, forKey: Field("target"))
+        setting = names.contains("setting") ? try container.decode(PowerSetting.self, forKey: Field("setting")) : .system
         if names.contains("minutes") {
             minutes = try container.decode(Int.self, forKey: Field("minutes"))
         } else {
@@ -485,7 +536,7 @@ private final class RequestHandler: ChannelInboundHandler, @unchecked Sendable {
                 respond(WebResponse(code: 413, message: "Request body is too large."))
                 return
             }
-            guard case .power = route else {
+            guard route == .power || route == .lock else {
                 respond(WebResponse(code: 400, message: "GET requests must not have a body."))
                 return
             }
@@ -528,10 +579,15 @@ private final class RequestHandler: ChannelInboundHandler, @unchecked Sendable {
             return
         }
         let request: PowerRequest?
+        let lockRequest: IdleLockRequest?
         do {
             request = try route == .power ? router.decodePower(body) : nil
+            lockRequest = try route == .lock ? router.decodeLock(body) : nil
         } catch {
-            respond(WebResponse(code: 400, message: "Invalid power request. Use action on, restore, or sleep; target both, battery, or adapter; and integer minutes from 1 to \(Int32.max) only for sleep. Unknown fields are not allowed."))
+            let message = route == .lock
+                ? "Invalid Lock request. Provide only action on or restore. Null, unknown, duplicate fields, targets, and setup actions are not allowed."
+                : "Invalid power request. Use action on, restore, or sleep; target both, battery, or adapter; optional setting system or display; and integer minutes from 1 to \(Int32.max) only for sleep. Null, unknown, and duplicate fields are not allowed."
+            respond(WebResponse(code: 400, message: message))
             return
         }
         guard work.acquire() else {
@@ -544,6 +600,10 @@ private final class RequestHandler: ChannelInboundHandler, @unchecked Sendable {
         workers.runIfActive(eventLoop: context.eventLoop) {
             defer { work.release() }
             let encoder = JSONEncoder()
+            if let lockRequest {
+                let result = try service.performIdleLock(lockRequest)
+                return WebResponse(code: result.succeeded ? 200 : 409, body: try encoder.encode(result))
+            }
             if let request {
                 let result = try service.perform(request)
                 return WebResponse(code: result.succeeded ? 200 : 409, body: try encoder.encode(result))
